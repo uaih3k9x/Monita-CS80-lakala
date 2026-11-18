@@ -75,7 +75,7 @@ public func nextWake(mode: ScreenMode, active: Bool, playing: Bool, retry: Bool,
         return nowS + tickS
     case .lyrics, .clock:
         return ((nowS / 60).rounded(.down) + 1) * 60 + boundaryEpsS
-    case .yieldToSaver:
+    case .yieldToSaver, .immersive:      // 沉浸模式自己排下一句的时刻（monita-cs80/Immersive.swift），这里只是兜底
         return nowS + inactiveWakeS
     }
 }

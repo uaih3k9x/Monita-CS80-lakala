@@ -4,6 +4,7 @@ import Foundation
 public enum ScreenMode: Equatable {
     case lyrics          // 正常：歌词页
     case clock           // 纯时钟页（≡ 键切换，fw v8）
+    case immersive       // 沉浸模式整屏歌词（fw v9 直连；查询键长按 / --immersive）
     case lockWallpaper   // Mac 锁屏：整屏壁纸 + 小时钟
     case yieldToSaver    // 旧链路 host 自己在播视频屏保：让路，不抢屏
 }
@@ -14,9 +15,10 @@ public enum Page: Equatable {
     public var toggled: Page { self == .lyrics ? .clock : .lyrics }
 }
 
-public func screenMode(locked: Bool, saverPlaying: Bool, page: Page = .lyrics) -> ScreenMode {
+public func screenMode(locked: Bool, saverPlaying: Bool, page: Page = .lyrics, immersive: Bool = false) -> ScreenMode {
     if saverPlaying { return .yieldToSaver }
     if locked { return .lockWallpaper }
+    if immersive { return .immersive }
     return page == .clock ? .clock : .lyrics
 }
 

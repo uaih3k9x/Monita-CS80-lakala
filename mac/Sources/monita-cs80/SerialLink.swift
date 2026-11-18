@@ -143,6 +143,28 @@ final class DeviceLink {
         return r
     }
 
+    /// 不等应答地发一串同类型帧（IMM_RECT 用；和 RECT 一样设备不应答，之后的一条请求的 ACK 就是同步点）
+    func send(_ type: UInt8, _ payloads: [[UInt8]]) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let port, info != nil else { return false }
+        var out: [UInt8] = []
+        for p in payloads {
+            seq &+= 1
+            out += encodeFrame(type: type, seq: seq, payload: p)
+            if out.count >= 1 << 20 { guard port.write(out) else { drop("写失败"); return false }; out.removeAll(keepingCapacity: true) }
+        }
+        if !out.isEmpty, !port.write(out) { drop("写失败"); return false }
+        return true
+    }
+
+    /// 这条 ACK 里的出错计数（CRC / 长度 / 被拒）比上一次多了吗；push 和沉浸模式共用一个基线
+    func newErrors(_ a: AckStats) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let errs = a.crcErr + a.lenErr + a.badParam
+        defer { errBase = errs }
+        return errs != errBase
+    }
+
     /// 原样写字节（bench 测裸吞吐用）
     func writeRaw(_ bytes: [UInt8]) -> Bool {
         lock.lock(); defer { lock.unlock() }

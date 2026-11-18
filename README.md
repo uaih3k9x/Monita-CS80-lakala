@@ -31,6 +31,7 @@
 <td align="center"><img src="docs/img/lyrics-pure.png" width="200"><br><sub>纯音乐</sub></td>
 <td align="center"><img src="docs/img/lock.png" width="200"><br><sub>锁屏 · 「主人 暂时不在」</sub></td>
 <td align="center"><img src="docs/img/clock.png" width="200"><br><sub>时钟页（≡ 键切换）</sub></td>
+<td align="center"><img src="docs/img/immersive.png" width="200"><br><sub>沉浸模式（查询键长按）</sub></td>
 </tr>
 </table>
 
@@ -38,6 +39,8 @@
 - 锁屏：Mac 锁屏时换成桌面壁纸 + 小时钟 + 留言条（名字可配置；拿不到壁纸时回退成上图的 CDE 锁屏框）。
 - 时钟页：按 ≡ 键在歌词页和时钟页之间切换（fw v8）。
 - 按键（fw v8）：`+` / `−` 调 Mac 音量，查询键 播放 / 暂停，≡ 切页。状态灯：播放中绿灯常亮；没连上 Mac 时蓝灯 2 s 亮 1 s 灭（同原厂心跳）。
+- 沉浸模式（fw v9，还没上机）：整屏只有歌词，当前句大字居中，离得越远越淡；切句时整屏缓动上滚——**滚动只改扫描基址，一个像素都不搬**，
+  Mac 只发新露出来的那一句。长按查询键进出，或 `--immersive` 开机就进。
 
 段码屏展示模式（示意图，代码画的，按功能分区摆放，不是玻璃的真实排布）：
 
@@ -69,6 +72,7 @@ Mac
        ▼
 CS80 (R05 原厂基带 + 我们的 app @0x60270000)
  ├─ 大屏：开机版权页（fw v7）；RECT/COPY 写进后台缓冲，PRESENT 翻页（三缓冲，滚动 ≈ 24 fps）
+ │        沉浸模式（fw v9）：整屏是一段"卷轴"，滚动 = 每帧改一次扫描基址（零拷贝，≤ 37.5 fps）
  ├─ 段码屏：Mac 每 250 ms 算一帧发 SEG（进度/时长/Mac 电量）；5 s 没收到时固件自己走时钟
  ├─ 按键（fw v8）→ KEY 事件回传 Mac：音量 / 播放暂停 / 切页
  └─ 状态灯（fw v8）← LED：Mac 播放中绿灯常亮；没连上时蓝灯心跳
@@ -82,7 +86,8 @@ CS80 (R05 原厂基带 + 我们的 app @0x60270000)
 fw/                     R05 原生 app
   build.sh              一键：生成桩表 → 编译 → 链接 → 打包 2PPA → 按 loader 规则静态校验
   app.c                 主 app：USB 收帧 → 大屏（三缓冲翻页，拿不到时退回双/单缓冲）/ 段码屏，协议见 docs/protocol.md
-  link/                 协议纯逻辑 proto.h · 跨缓冲 COPY blit.h · 三缓冲 tribuf.h · 按键 keys.h · 状态灯 led.h · 诊断 diag.h / zc_diag.h（主机单测 test.sh）
+  link/                 协议纯逻辑 proto.h · 跨缓冲 COPY blit.h · 三缓冲 tribuf.h · 沉浸模式卷轴 imm.h · 按键 keys.h · 状态灯 led.h
+                        · 主机在不在 linkwd.h · 诊断 diag.h / zc_diag.h（主机单测 test.sh）
   io/                   按键 keys_hw.h（3 个 GPIO + PWRKEY 回调）· 状态灯 led_hw.h（3 个 GPIO）
   sdk/                  r05_api.h 导入原型 · gen_stubs.py · pack.py · validate.py · app.ld · r05_exports.csv
   fg00/                 段码屏驱动 fg00.h + 段位映射 segmap.h
@@ -131,6 +136,9 @@ swift build -c release
 查询键短按 播放 / 暂停（走 mediaremote-adapter 的 `send 2`），
 ≡ 短按切 歌词页 ↔ 时钟页；播放中绿灯常亮，退出（SIGINT / SIGTERM）时先灭灯。`--no-keys` / `--no-led` 分别关掉；
 `--png out.png --clock --sample …` 出时钟页预览。
+
+沉浸模式（直连 + fw v9，`caps` bit6）：查询键**长按**进 / 出，或 `--immersive` 开机就进；锁屏时自动回普通锁屏页，解锁再回来。
+设备内存不够开卷轴时（IMM_ENTER 被拒）留在普通歌词页并打日志。`--png out.png --immersive --sample … --at 40` 出预览。
 
 **mediaremote-adapter 放哪**：渲染器（播放/暂停）和 `lyrics.py`（读 Now Playing）用同一套查找顺序，第一个装好了的生效：
 设了 `MONITA_MRA_DIR` 就只认它；否则依次找 `$MONITA_HOME/mediaremote-adapter` → `~/.monita-cs80/mediaremote-adapter`（`build-nowplaying.sh` 的默认产物位置）

@@ -29,6 +29,11 @@
 #define LK_COPY      0x22u   /* u16 sx,sy,w,h,dx,dy: 画布内搬矩形 (允许重叠), 不应答 */
 #define LK_FBCRC     0x40u   /* u16 x,y,w,h -> ACK 带 crc32 */
 #define LK_PING      0x7Fu
+/* 沉浸模式 (fw v9, link/imm.h): 整屏只放卷轴, 滚动 = 改扫描基址 */
+#define LK_IMM_ENTER  0x60u  /* u32 y0 (可省 = 0) -> ACK (extra = 卷轴行数 R); 已在沉浸模式 = 重新开始 */
+#define LK_IMM_EXIT   0x61u  /* 空 -> ACK (extra = 恢复后的 caps) */
+#define LK_IMM_RECT   0x62u  /* u32 y, u16 x, w, h, u8 flags, u8 0 + w*h 个 RGB565; 不应答 (同 RECT) */
+#define LK_IMM_SCROLL 0x63u  /* u32 y, u16 dur_ms -> ACK (extra = 正在扫描的窗口顶) */
 /* 设备 -> 主机 */
 #define LK_HELLO_ACK 0x81u
 #define LK_KEY       0x90u   /* u8 key, u8 ev, u16 n, u32 uptime (fw v8, link/keys.h); 主动上报, seq = 0, 主机不应答 */
@@ -46,6 +51,7 @@
 #define LK_CAP_TRIBUF    0x0008u   /* 三缓冲 (fw v6): PRESENT 后下一批不用等帧头 */
 #define LK_CAP_KEYS      0x0010u   /* 按键上报 KEY (0x90), fw v8 */
 #define LK_CAP_LED       0x0020u   /* 状态灯 LED (0x31), fw v8 */
+#define LK_CAP_IMMERSIVE 0x0040u   /* 沉浸模式 IMM_* (0x60..0x63), fw v9 */
 #define LK_PIXFMT_RGB565 1u
 
 /* ---- CRC-32/IEEE (反射, 多项式 0xEDB88320, 初值/终值异或 0xFFFFFFFF) ----
@@ -76,6 +82,7 @@ __attribute__((unused)) static uint32_t lk_crc32(const uint8_t *p, uint32_t n){
 }
 
 static inline uint16_t lk_rd16(const uint8_t *p){ return (uint16_t)(p[0] | (p[1] << 8)); }
+static inline uint32_t lk_rd32(const uint8_t *p){ return (uint32_t)lk_rd16(p) | ((uint32_t)lk_rd16(p + 2) << 16); }
 static inline void lk_wr16(uint8_t *p, uint32_t v){ p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static inline void lk_wr32(uint8_t *p, uint32_t v){
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);

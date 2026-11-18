@@ -29,6 +29,8 @@
 //   --seg-png out.png：段码屏离线示意图；配 --sample 时画 播放中 / 暂停 / 没在播 三行
 //   按键 / 状态灯（直连 + fw v8，见 Controls.swift）：+/− 系统音量，≡ 切 歌词页 ↔ 时钟页，查询 播放/暂停；
 //   播放中绿灯常亮。--no-keys / --no-led 关掉；--png out.png --clock 出时钟页预览
+//   沉浸模式（直连 + fw v9，见 Immersive.swift）：整屏歌词、滚动改扫描基址（零拷贝）。--immersive 开机就进，查询键长按切换；
+//   --png out.png --immersive 出预览
 import AppKit
 import MonitaCore
 import CoreGraphics
@@ -58,6 +60,7 @@ var segOn = true
 var keysOn = true
 var ledOn = true
 var pngClock = false
+var immersiveFlag = false
 var segPngPath: String?
 do {
     var args = CommandLine.arguments.dropFirst().makeIterator()
@@ -84,9 +87,10 @@ do {
         case "--no-keys": keysOn = false
         case "--no-led": ledOn = false
         case "--clock": pngClock = true
+        case "--immersive": immersiveFlag = true
         case "--seg-png": segPngPath = args.next()
         default:
-            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock]")
+            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock|--immersive] [--immersive]")
             exit(a == "-h" || a == "--help" ? 0 : 2)
         }
     }
@@ -140,6 +144,7 @@ final class Shared {
     private var _locked = false
     private var _lockedSince: Date?
     private var _page = Page.lyrics
+    private var _immersive = false
     // 唤醒：渲染循环等 _kicked，暂停中的轮询线程等解锁；任何影响画面的状态变化都 broadcast
     private let cond = NSCondition()
     private var _kicked = false
@@ -188,6 +193,8 @@ final class Shared {
     var lockedSince: Date? { with { $0._lockedSince } }
     /// ≡ 键切换的页（锁屏 / 屏保优先于它）
     var page: Page { get { with { $0._page } } set { set { let c = $0._page != newValue; $0._page = newValue; return c } } }
+    /// 沉浸模式开关（查询键长按 / --immersive）；锁屏 / 屏保优先于它
+    var immersive: Bool { get { with { $0._immersive } } set { set { let c = $0._immersive != newValue; $0._immersive = newValue; return c } } }
     func requestFull() { with { $0._markFull = true }; kick() }
     func takeFull() -> Bool { with { let v = $0._markFull; $0._markFull = false; return v } }
 }
@@ -406,6 +413,13 @@ if let png = pngPath {
     }
     if pngLock { if samplePath == nil { wallpaper.refresh() }; _ = renderLock(Date(), since: samplePath == nil ? nil : Date(timeIntervalSinceNow: -25 * 60)) }
     else if pngClock { _ = renderClock(lyricsInput(Date()).0) }
+    else if immersiveFlag {
+        let inp = lyricsInput(Date()).0
+        let c = page.immBuild(inp.data, cfg: inp.cfg)
+        let pos = inp.data.map { positionAt($0.play, nowMs: inp.nowMs) } ?? 0
+        let line = c.times.isEmpty ? -1 : lineIndex(c.times, pos + lyricLeadS)
+        page.immDrawWindow(c, y: immTarget(c.blocks, line: line, screenH: screenH), line: line)
+    }
     else { _ = render(lyricsInput(Date()).0) }
     let ok = canvas.writePNG(png)
     print(ok ? "wrote \(png)" : "write failed")
@@ -424,6 +438,8 @@ if bench {
 }
 log("monita-cs80 启动：\(link.map { "device=\($0.name)" } ?? "host=\(hostURL)") tick=\(Int(tickMs))ms\(dryRun ? " (dry-run)" : "")")
 let forceLock = dryRun && pngLock   // --dry-run --lock：模拟锁屏
+shared.immersive = immersiveFlag && link != nil
+let immDriver = link.map { ImmersiveDriver(link: $0, page: page) }
 shared.locked = forceLock || sessionLocked()
 every(1.0, "lyrics", pauseWhenLocked: true, fetchLyrics)
 if let link {
@@ -481,9 +497,10 @@ var statsAt = nowMs()
 func tick() -> Double {
     stats.wakes += 1
     if shared.takeFull() { fullNeeded = true }
-    let m = screenMode(locked: shared.locked, saverPlaying: shared.saver, page: shared.page)
+    let m = screenMode(locked: shared.locked, saverPlaying: shared.saver, page: shared.page, immersive: shared.immersive)
     if m != mode {
         log("画面切换：\(mode) → \(m)")
+        if mode == .immersive { immDriver?.exit() }      // 先还原设备上的多缓冲，再推整帧
         mode = m
         fullNeeded = true            // 进/出锁屏都一次整帧，之后只有小块差分
         wallpaperCheckedAt = 0
@@ -500,6 +517,15 @@ func tick() -> Double {
                  sinceS: since?.timeIntervalSince1970, tickS: tickS)
     }
     if !active { fullNeeded = true; return wake() }
+    if m == .immersive, let immDriver, let link {
+        fullNeeded = true                              // 出沉浸模式时整帧
+        if link.info?.hasImmersive != true {
+            log("沉浸模式：固件不支持（要 fw v9），留在普通页面"); shared.immersive = false; return wake()
+        }
+        if !immDriver.active && !immDriver.enter() { shared.immersive = false; return wake() }
+        let inp = lyricsInput(now).0
+        return immDriver.tick(inp.data, cfg: inp.cfg, nowMs: inp.nowMs)
+    }
     if nowMs() - lastFull > 3_600_000 { fullNeeded = true }  // 60 分钟兜底
     if m == .lockWallpaper && nowMs() - wallpaperCheckedAt > 60_000 {
         wallpaperCheckedAt = nowMs()

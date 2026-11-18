@@ -11,6 +11,9 @@
  * 段码屏: 主区 "------"; HELLO 带了时间后小时钟走 hh:mm:ss。主机发过 SEG 后 5 s 内由主机接管整块显存。
  * 按键 (v8): 主循环每 ≈ 10 ms 采样 (io/keys_hw.h), 去抖/长按在 link/keys.h; HELLO 之后才发 KEY (0x90), 同一任务里写, 不和应答交错。
  * 状态灯 (v8): link/led.h 状态机, 主循环每轮算一次掩码, 变了才写 GPIO (不开任务、不忙等)。
+ * 沉浸模式 (v9): IMM_ENTER 把第二、三块 fb 还给堆, 换一块尽量长的"卷轴" (link/imm.h); 整屏只显示卷轴里的一段,
+ *   滚动 = 主循环每帧最多写一次扫描基址 (缓动在固件里), 原厂 fb 当保留缓冲 (换底绕道 / 退出时留住最后一帧)。
+ *   IMM_EXIT 还掉卷轴、重新拿第二、三块 (拿不到就少几块, ACK 里给新的 caps)。沉浸模式下 RECT / COPY / PRESENT / 旧 DIAG 一律拒。
  *   未连接: 蓝灯 2 s 亮 1 s 灭 (同原厂常态心跳); HELLO 后熄灭, 交给主机 LED (0x31);
  *   HELLO 之后 15 s 收不到任何字节 = 主机走了 (link/linkwd.h), 回到蓝灯心跳, 也不再发 KEY;
  *   (v9) 之后又收到字节就当主机回来了: 恢复 KEY 上报, 灯恢复成主机最后设的样子 (主机睡醒后不一定重发 HELLO)。
@@ -25,8 +28,9 @@
 #include "keys_hw.h"
 #include "led_hw.h"
 #include "linkwd.h"
+#include "imm.h"
 
-#define FW_VER       0x0009u          /* 9: 主机不经 HELLO 回来时恢复 KEY/灯 (link/linkwd.h), PWRKEY 慢采样不丢轻点; 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
+#define FW_VER       0x0009u          /* 9: 沉浸模式 (link/imm.h), 主机不经 HELLO 回来时恢复 KEY/灯 (link/linkwd.h), PWRKEY 慢采样不丢轻点; 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
 #define MAX_PAYLOAD  32768u          /* 800 x 20 行 RGB565 + 8 字节头 = 32008, 放得下一条整行带 */
 #define RX_CHUNK     16384u
 #define PORT         R05_PORT_USB_MODEM
@@ -123,6 +127,18 @@ static void lcd_show(uint32_t fb){
     ql_mipi_lcd_write_screen((void *)fb);
     if (g_back) g_back = (fb == FB_ADDR) ? g_fb2 : FB_ADDR;
     g_front = fb;
+}
+
+/* n 字节 (32 的倍数, 两边 32 B 对齐) 按地址升序 ldm/stm 搬; 同一块里 dst < src 的重叠也安全 (先读满 8 个字再写) */
+static void move32(uint32_t d, uint32_t s, uint32_t n){
+    uint32_t k = n / 32u;
+    if (!k) return;
+    __asm__ volatile(
+        "1: ldmia %1!, {r4-r11}\n"
+        "   stmia %0!, {r4-r11}\n"
+        "   subs %2, %2, #1\n"
+        "   bne 1b\n"
+        : "+r"(d), "+r"(s), "+r"(k) :: "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc", "memory");
 }
 
 /* 行区间整块拷贝 (两块不同缓冲), CPU 搬:
@@ -344,10 +360,175 @@ static void keys_poll(void){
 
 static void led_poll(void){ if (g_led_ok) led_hw_apply(led_step(&g_led, now_ms())); }
 
+/* ---- 沉浸模式 (fw v9, link/imm.h) ---- */
+#define IMM_MAX_ROWS 4096u                 /* 卷轴最多这么多行 (6.5 MB); 实际按堆里能拿到的 */
+#define ROW_B (LCD_W * 2u)
+static int      g_lcd_ok;
+static int      g_imm;                     /* 在沉浸模式里 */
+static im_t     g_im;
+static uint32_t g_roll, g_roll_raw, g_roll_rows;
+
+static uint32_t caps(void){
+    return LK_CAP_FBCRC | LK_CAP_COPY | (g_tb.n > 1 ? LK_CAP_DOUBLEBUF : 0u) | (g_tb.n > 2 ? LK_CAP_TRIBUF : 0u)
+         | (g_keys_ok ? LK_CAP_KEYS : 0u) | (g_led_ok ? LK_CAP_LED : 0u) | (g_lcd_ok ? LK_CAP_IMMERSIVE : 0u);
+}
+
+static uint32_t im_addr(int buf, uint32_t row){ return (buf == IM_BUF_ROLL ? g_roll : FB_ADDR) + row * ROW_B; }
+static void im_io_copy(void *c, int db, uint32_t dr, int sb, uint32_t sr, uint32_t n){
+    (void)c;
+    uint32_t d = im_addr(db, dr);
+    move32(d, im_addr(sb, sr), n * ROW_B);             /* 1600 B/行 = 50 × 32 B, 基址 256 B 对齐 */
+    dcache_clean(d, n * ROW_B);
+}
+static void im_io_base(void *c, int buf, uint32_t row){
+    (void)c;
+    if (buf == IM_BUF_ROLL ? row + LCD_H > g_roll_rows : row != 0) return;   /* 保底: 整帧出了缓冲就花屏, 宁可不动 */
+    ql_mipi_lcd_write_screen((void *)im_addr(buf, row));
+    wr32(LCDC_EVT, LCDC_EVT_FRAME);                    /* 之后再置位 = 新基址已锁存 */
+}
+static void im_io_wait(void *c){ (void)c; tb_wait_evt(0); }
+static const im_io_t g_imio = { im_io_copy, im_io_base, im_io_wait, 0 };
+
+/* 主循环每轮: 锁存 / 下一帧的基址 / 停稳了就换底 */
+static void imm_poll(void){
+    if (!g_imm) return;
+    uint32_t t = now_ms();
+    int32_t r = im_tick(&g_im, t, (rd32(LCDC_EVT) & LCDC_EVT_FRAME) != 0);
+    if (r >= 0) im_io_base(0, IM_BUF_ROLL, (uint32_t)r);
+    else if (im_should_rebase(&g_im, t)) im_rebase(&g_im, &g_imio);
+}
+
+/* 多缓冲收拢到原厂 fb 上: 没有待锁存的、扫描的就是 FB_ADDR、内容是最新提交的那帧; 然后还掉第二、三块 */
+static void imm_release_fbs(void){
+    if (g_tb.n > 1){
+        if (g_tb.d >= 0){ g_tb.ver[g_tb.d] = 0; g_tb.d = -1; g_tb.y0 = LCD_H; g_tb.y1 = 0; }   /* 没提交的改动作废 */
+        tb_poll();
+        if (g_tb.p >= 0){ tb_wait_evt(0); tb_latched(&g_tb); }
+        uint32_t s = tb_addr(g_tb.s);
+        if (s != FB_ADDR){
+            copy_rows(FB_ADDR, s, 0, LCD_H);
+            ql_mipi_lcd_write_screen((void *)FB_ADDR);
+            wr32(LCDC_EVT, LCDC_EVT_FRAME);
+            tb_wait_evt(0);
+        }
+    } else flush_dirty();
+    if (g_fb3_raw) free((void *)g_fb3_raw);
+    if (g_fb2_raw) free((void *)g_fb2_raw);
+    g_fb2 = g_fb2_raw = g_fb3 = g_fb3_raw = 0;
+    g_nbuf = 1;
+    tb_setup(1, FB_ADDR);
+}
+
+/* 卷轴: 先二分出最大可 malloc 的块, 再从它往下试, 拿到后堆里还要剩 TRI_RESERVE。返回行数, 0 = 拿不到够用的 */
+static uint32_t imm_alloc(void){
+    uint32_t lo = 0, hi = 8u << 20;
+    while (hi - lo > 65536u){
+        uint32_t mid = lo + ((hi - lo) >> 1);
+        void *p = malloc(mid);
+        if (p){ free(p); lo = mid; } else hi = mid;
+    }
+    uint32_t rows = lo > 256u ? udiv(lo - 256u, ROW_B, 0) : 0;
+    if (rows > IMM_MAX_ROWS) rows = IMM_MAX_ROWS;
+    for (; rows >= LCD_H + IM_MIN_AHEAD; rows -= 80u){               /* 80 行 = 125 KiB 一档 */
+        void *p = malloc(rows * ROW_B + 256u);
+        if (!p) continue;
+        void *probe = malloc(TRI_RESERVE);
+        if (probe){
+            free(probe);
+            g_roll_raw = (uint32_t)p; g_roll = ((uint32_t)p + 255u) & ~255u; g_roll_rows = rows;
+            return rows;
+        }
+        free(p);
+    }
+    return 0;
+}
+
+static void imm_exit(void){
+    if (!g_imm) return;
+    im_hold(&g_im, &g_imio, now_ms());                 /* 屏上留着最后一帧 (原厂 fb), 卷轴不再被扫 */
+    free((void *)g_roll_raw);
+    g_roll = g_roll_raw = g_roll_rows = 0;
+    g_imm = 0;
+    dbuf_init();                                       /* 重新拿第二、三块; 拿不到就少几块 */
+}
+
+/* IMM_ENTER: 返回 ACK status, *rows = 卷轴行数 */
+static uint8_t imm_enter(uint32_t y0, uint32_t *rows){
+    *rows = 0;
+    if (!g_lcd_ok) return LK_EUNSUP;
+    if (g_imm){                                        /* 重新开始 (换歌 / 往回跳) */
+        im_hold(&g_im, &g_imio, now_ms());
+        im_restart(&g_im, y0);
+        *rows = g_roll_rows;
+        return LK_OK;
+    }
+    g_boot_live = 0;
+    imm_release_fbs();
+    if (!imm_alloc() || im_init(&g_im, g_roll_rows, LCD_H, y0)){
+        if (g_roll_raw) free((void *)g_roll_raw);
+        g_roll = g_roll_raw = g_roll_rows = 0;
+        dbuf_init();                                   /* 不够: 原样恢复多缓冲, 主机留在普通页面 */
+        return LK_EUNSUP;
+    }
+    g_imm = 1;
+    *rows = g_roll_rows;
+    return LK_OK;
+}
+
+/* 卷轴不够时: 等掉待锁存的, 能换底就换 (IMM_RECT / IMM_SCROLL 共用) */
+static void imm_make_room(void){
+    im_settle(&g_im, &g_imio, now_ms());
+    if (im_can_rebase(&g_im)) im_rebase(&g_im, &g_imio);
+}
+
+/* IMM_RECT: u32 y, u16 x, w, h, u8 flags, u8 0, w*h 个 RGB565 */
+static int imm_rect(const uint8_t *pl, uint32_t n){
+    if (!g_imm || n < 12) return 0;
+    uint32_t y = lk_rd32(pl), x = lk_rd16(pl + 4), w = lk_rd16(pl + 6), h = lk_rd16(pl + 8), fl = pl[10], row;
+    if (w == 0 || h == 0 || x + w > LCD_W || n != 12u + w * h * 2u) return 0;
+    int r = im_write(&g_im, y, h, fl, &row);
+    if (r == IM_ERANGE && im_fits_after_rebase(&g_im, y, h)){ imm_make_room(); r = im_write(&g_im, y, h, fl, &row); }
+    if (r != IM_OK) return 0;
+    const uint8_t *src = pl + 12;
+    for (uint32_t i = 0; i < h; i++)
+        lk_row_move((uint16_t *)(g_roll + (row + i) * ROW_B) + x, (const uint16_t *)(src + i * w * 2u), w, 0);
+    dcache_clean(g_roll + row * ROW_B, h * ROW_B);
+    return 1;
+}
+
+static uint8_t imm_scroll(const uint8_t *pl, uint32_t n){
+    if (!g_imm || n != 6) return LK_EPARAM;
+    uint32_t y = lk_rd32(pl), dur = lk_rd16(pl + 4);
+    int r = im_scroll(&g_im, y, dur, now_ms());
+    if (r == IM_ERANGE && im_fits_after_rebase(&g_im, y, LCD_H)){ imm_make_room(); r = im_scroll(&g_im, y, dur, now_ms()); }
+    return r == IM_OK ? LK_OK : LK_EPARAM;
+}
+
 static void on_frame(void){
     const uint8_t *pl = g_pl; uint32_t n = g_p.len;
     if (g_p.type == LK_RECT || g_p.type == LK_COPY || g_p.type == LK_DIAG) g_boot_live = 0;   /* 主机开始画了 / 诊断可能动缓冲 */
+    if (g_imm){                                        /* 沉浸模式: 普通画面的写操作和会动缓冲的诊断一律拒 */
+        if (g_p.type == LK_RECT || g_p.type == LK_COPY){ st.bad_param++; return; }
+        if (g_p.type == LK_PRESENT){ ack(LK_EPARAM, 0); return; }
+        if (g_p.type == LK_DIAG){ diag_reply(n ? pl[0] : 0, LK_EUNSUP, 0, 0); return; }
+    }
     switch (g_p.type){
+    case LK_IMM_ENTER: {
+        uint32_t rows;
+        uint8_t stt = imm_enter(n >= 4 ? lk_rd32(pl) : 0u, &rows);
+        ack(stt, rows);
+        return;
+    }
+    case LK_IMM_EXIT:
+        imm_exit();
+        ack(LK_OK, caps());
+        return;
+    case LK_IMM_RECT:
+        if (imm_rect(pl, n)) st.rects++; else st.bad_param++;
+        return;                                        /* 同 RECT: 不应答 */
+    case LK_IMM_SCROLL:
+        ack(imm_scroll(pl, n), g_imm ? g_im.ys : 0u);
+        return;
     case LK_RECT:
         draw_begin();
         if (lk_rect_apply((uint16_t *)draw_target(), LCD_W, LCD_H, pl, n, &g_tb.y0, &g_tb.y1) == LK_OK) st.rects++;
@@ -371,12 +552,12 @@ static void on_frame(void){
         boot_link_ok();                                /* 开机画面还在: Link 行 WAIT -> OK */
         lw_hello(&g_lw, now_ms()); g_key_n = 0;        /* KEY 计数从这条 HELLO 重新算 */
         led_off(&g_led); led_poll();                   /* 灯交给主机 */
+        imm_exit();                                    /* 主机重连 = 它不记得沉浸模式了: 回普通画面 */
         uint8_t *b = g_tx;
         lk_wr16(b + 0, LK_PROTO_VER); lk_wr16(b + 2, FW_VER);
         lk_wr16(b + 4, LCD_W); lk_wr16(b + 6, LCD_H);
         b[8] = LK_PIXFMT_RGB565; b[9] = 72;
-        lk_wr16(b + 10, LK_CAP_FBCRC | LK_CAP_COPY | (g_tb.n > 1 ? LK_CAP_DOUBLEBUF : 0u) | (g_tb.n > 2 ? LK_CAP_TRIBUF : 0u)
-                         | (g_keys_ok ? LK_CAP_KEYS : 0u) | (g_led_ok ? LK_CAP_LED : 0u)); lk_wr16(b + 12, MAX_PAYLOAD); lk_wr16(b + 14, 0);
+        lk_wr16(b + 10, caps()); lk_wr16(b + 12, MAX_PAYLOAD); lk_wr16(b + 14, 0);
         reply(LK_HELLO_ACK, b, 16);
         if (!seg_host_active(now_us())) seg_draw_local();
         return;
@@ -399,9 +580,11 @@ static void on_frame(void){
         led_poll();
         return;
     case LK_FBCRC: {
-        uint32_t c = 0;                                /* 校验的是最新提交的那块 (已显示, 或下一个帧头显示) */
+        uint32_t c = 0, row;                           /* 校验的是最新提交的那块 (已显示, 或下一个帧头显示) */
         if (g_tb.n == 1) flush_dirty();
-        uint32_t s = lk_fb_crc((const uint16_t *)tb_addr(tb_latest(&g_tb)), LCD_W, LCD_H, pl, n, &c);
+        uint32_t fb = tb_addr(tb_latest(&g_tb));
+        if (g_imm) fb = im_latest(&g_im, &row) ? g_roll + row * ROW_B : FB_ADDR;   /* 沉浸模式: 屏上那一段卷轴 */
+        uint32_t s = lk_fb_crc((const uint16_t *)fb, LCD_W, LCD_H, pl, n, &c);
         ack((uint8_t)s, c);
         return;
     }
@@ -464,6 +647,7 @@ static void task_entry(void *arg){
     int seg_err = fg_init();                           /* 888888 */
     int lcd_err = lcd_power_on();
     if (lcd_err == 0){
+        g_lcd_ok = 1;
         dbuf_init();
         boot_draw(seg_err == 0);
         ql_rtos_task_sleep_ms(200);
@@ -499,6 +683,7 @@ static void task_entry(void *arg){
             }
             last_rx = now_us();
             keys_poll();                               /* 整帧连续推 ≈ 300 ms 时也照常采样 */
+            imm_poll();                                /* 主机连续写卷轴时滚动也照走 */
         }
         uint32_t t = now_us();
         tb_poll();                                     /* 待锁存的过了帧头 -> 记成正在扫描 */
@@ -509,6 +694,7 @@ static void task_entry(void *arg){
         if (lw_tick(&g_lw, now_ms()) == LW_LOST){ g_led_host = g_led; led_default(); }   /* 主机走了: 回到未连接心跳 */
         keys_poll();
         led_poll();
+        imm_poll();
     }
 }
 

@@ -24,7 +24,7 @@ public struct KeyEvent: Equatable {
 
 public enum KeyAction: Equatable {
     case volumeUp, volumeDown, togglePage, playPause
-    case queryLong   // 查询键长按：还没定用途（TODO）
+    case queryLong   // 查询键长按：进 / 出沉浸模式（fw v9）
 }
 
 /// 按键事件 → 动作。+/− 按下立即生效；≡、查询 在抬起时判短按（中间没有 LONG）。

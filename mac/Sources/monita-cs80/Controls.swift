@@ -1,5 +1,5 @@
 // 前面板按键和状态灯（fw v8；纯逻辑在 MonitaCore/Controls.swift，协议见 docs/protocol.md）。
-//   按键：+ / − 调系统音量（osascript，每下 6/100）；≡ 短按切 歌词页 ↔ 时钟页；查询 短按 播放/暂停，长按 TODO。
+//   按键：+ / − 调系统音量（osascript，每下 6/100）；≡ 短按切 歌词页 ↔ 时钟页；查询 短按 播放/暂停，长按 进/出沉浸模式。
 //   状态灯：播放中绿灯常亮，暂停/没在放熄灭；有会话在等人时蓝灯闪（数据源 PanelInfo.waitingLit，直连模式下暂时没有）。
 //           每次连上重发一次（设备 HELLO 会灭灯）；渲染器收到 SIGINT/SIGTERM 时先发灭灯再退出。
 //   --no-keys / --no-led 分别关掉。
@@ -61,7 +61,10 @@ func perform(_ a: KeyAction) {
         log("按键：切到\(p == .clock ? "时钟页" : "歌词页")")
         shared.page = p
     case .playPause: togglePlayPause()
-    case .queryLong: log("按键：查询键长按（还没分配功能）")   // TODO: 长按用途待定
+    case .queryLong:
+        guard deviceSpec != nil else { return log("按键：查询键长按（沉浸模式只在直连时有）") }
+        shared.immersive.toggle()
+        log("按键：查询键长按，沉浸模式\(shared.immersive ? "开" : "关")")
     }
 }
 
