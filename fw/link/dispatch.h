@@ -7,7 +7,7 @@
  *   状态   g_p (lk_parser_t), g_pl (payload 缓冲), g_tx[64], st {rx_bytes, rects, presents, bad_param},
  *          g_tb (tb_t), g_imm, g_im (im_t), g_roll (卷轴首地址), g_boot_live, g_flip_now,
  *          g_lw (lw_t), g_key_n, g_key_at, g_keys, g_pwr, g_led, g_led_host, g_keys_ok, g_led_ok, g_lcd_ok,
- *          fg_fb[72], seg_host_at, seg_host_seen
+ *          fg_fb[72] (fg00/fgbuf.h), seg_host_at, seg_host_seen (fg00/segclock.h)
  *   常量   FW_VER, MAX_PAYLOAD, LCD_W, LCD_H, ROW_B, FB_ADDR, PORT, KEY_SAMPLE_MS
  *   函数   osiUpTimeUS, now_us, now_ms, reply, diag_reply, on_diag, dcache_clean, ql_uart_write, keys_hw_raw,
  *          draw_begin, draw_target, do_copy, present, flush_dirty, tb_addr,

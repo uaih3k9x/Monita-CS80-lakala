@@ -4,7 +4,8 @@
  *   - 3 块 800×1280 RGB565 帧缓冲 (同实机: 原厂 fb + 开机 malloc 的第二、三块), 扫描基址是一个指针;
  *   - 帧事件"立即发生": 写完基址马上算锁存 (理想硬件, 等帧不花时间);
  *   - 卷轴按 sim_roll_rows 分配 (实机按堆里能拿到的, 典型 ≈ 2700 行);
- *   - 按键电平 / PWRKEY 计数由 sim_key_* 注入, 灯、背光、段码屏、时钟只记下来给测试看;
+ *   - 按键电平 / PWRKEY 计数由 sim_key_* 注入; 灯、背光只记下来给测试看;
+ *   - 段码屏本地时钟是真固件代码 (fw/fg00/segclock.h + fgbuf.h + segmap.h), 只是 fg_flush 不刷 I2C, 显存 fg_fb 给测试看;
  *   - DIAG: 31 / 32 / 11 和"先收拢多缓冲"的分流走 dispatch.h, 具体的旧 op (diag.h, 碰寄存器) 换成桩:
  *     认识的 op 回 status 0、不带数据, 不认识的回 3 (同实机)。
  * 用的地方: tools/fwsim/fwsim.c (pty 上跑, 给上位机连) 和 fw/link/test_dispatch.c (单测)。
@@ -23,6 +24,8 @@
 #include "keys.h"
 #include "led.h"
 #include "linkwd.h"
+#include "../../fw/fg00/fgbuf.h"
+#include "../../fw/fg00/segmap.h"
 
 #define FW_VER        0x0009u          /* 跟 fw/app.c 的 FW_VER (tools/fwsim/run.sh 会对一遍) */
 #define LCD_W         800u
@@ -54,8 +57,7 @@ static uint32_t now_ms(void){ return (uint32_t)(osiUpTimeUS() >> 10); }   /* 1.0
 
 /* ---- 给测试看的记录 ---- */
 static struct {
-    uint32_t collapse, uncollapse, seg_writes, seg_local, backlight, bl_writes, clock_unix, clock_set;
-    int32_t  clock_tz;
+    uint32_t collapse, uncollapse, seg_writes, backlight, bl_writes;
     uint8_t  led_mask;
     uint32_t base_writes;
 } sim;
@@ -81,8 +83,6 @@ static keys_t   g_keys;
 static pwr_t    g_pwr;
 static uint32_t g_key_n, g_key_at;
 static led_t    g_led, g_led_host;
-static uint8_t  fg_fb[72];
-static uint32_t seg_host_at; static int seg_host_seen;
 
 /* 帧缓冲: 第 0 块 = "原厂 fb" (FB_ADDR), 沉浸模式里当保留缓冲 */
 static uint16_t sim_fb0[LCD_W * LCD_H] __attribute__((aligned(256)));
@@ -104,12 +104,13 @@ static void diag_reply(uint8_t op, uint8_t status, const uint32_t *w, uint32_t n
     reply(LK_DIAG_R, b, lk_diag_payload(b, op, status, w, n));
 }
 
-/* ---- 段码屏 / 时钟 / 背光 / 灯 / 开机页: 只记账 ---- */
-static void clk_set(uint32_t unix_s, int32_t tz_min){ sim.clock_unix = unix_s; sim.clock_tz = tz_min; sim.clock_set++; }
-static void boot_link_ok(void){ g_boot_live = 0; }
-static int  seg_host_active(uint32_t t){ return seg_host_seen && (t - seg_host_at) < 5000000u; }
-static void seg_draw_local(void){ sim.seg_local++; }
+/* ---- 段码屏: 真固件的本地时钟 (segclock.h), 刷屏只记账 ---- */
+#define SEG_HOST_HOLD_US 5000000u                       /* 同 fw/app.c */
 static void fg_flush(void){ sim.seg_writes++; }
+#include "../../fw/fg00/segclock.h"
+
+/* ---- 背光 / 灯 / 开机页: 只记账 ---- */
+static void boot_link_ok(void){ g_boot_live = 0; }
 static void lcd_backlight(uint32_t on){ sim.backlight = on ? 1u : 0u; sim.bl_writes++; }
 static void led_poll(void){ if (g_led_ok) sim.led_mask = led_step(&g_led, now_ms()); }
 
@@ -288,11 +289,12 @@ static void imm_make_room(void){
 
 #include "dispatch.h"
 
-/* ---- 主循环 (同 app.c task_entry, 去掉看门狗 / 时钟 / cache) ---- */
+/* ---- 主循环 (同 app.c task_entry, 去掉看门狗 / cache) ---- */
 static uint32_t sim_last_rx;
 static void sim_init(void){
     g_boot_live = 1;
     dbuf_init();
+    if (g_lcd_ok){ lcd_backlight(1); seg_draw_local(); }   /* 同 app.c: 开机亮背光, 段码屏 "------" (还没有时间) */
     led_init(&g_led); led_default(); led_poll();
     keys_init(&g_keys); pwr_init(&g_pwr); lw_init(&g_lw);
     lk_init(&g_p, g_pl, sim_max_payload > SIM_PL_CAP ? SIM_PL_CAP : sim_max_payload);
@@ -309,6 +311,7 @@ static void sim_tick(void){
     tb_poll();
     if (g_tb.n == 1 && t - sim_last_rx > 50000u) flush_dirty();
     if (!lk_idle(&g_p) && t - sim_last_rx > 500000u) lk_reset(&g_p);   /* 半截帧: 丢掉重新找同步字 */
+    if (g_lcd_ok) clk_tick(t);
     link_lost_poll();
     keys_poll();
     led_poll();

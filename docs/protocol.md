@@ -289,14 +289,16 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 
 ## 不用设备测上位机：固件模拟器
 
-`tools/fwsim/`：把固件的协议层（`fw/link/dispatch.h` 和它用到的 proto / blit / tribuf / imm / keys / led / linkwd）原样编成主机程序，
+`tools/fwsim/`：把固件的协议层（`fw/link/dispatch.h` 和它用到的 proto / blit / tribuf / imm / keys / led / linkwd）
+和段码屏本地时钟（`fw/fg00/segclock.h` + `fgbuf.h`）原样编成主机程序，
 硬件换成假的（3 块帧缓冲、卷轴、按键注入；帧事件立即发生），开一个伪终端当 USB 串口。
 
 - `sh tools/fwsim/run.sh`：Python 参考实现和 Mac 渲染器（debug 构建）各跑一遍同一套脚本（HELLO、整帧 / COPY / FBCRC、SEG、LED、
   按键、未知 type、DIAG、坏帧、沉浸模式 ...），四种模拟器配置（三 / 单 / 双缓冲 + 16 KiB max_payload / 卷轴不够），
-  结果和本文档逐项对比，两个上位机之间也要一致。
+  结果和本文档逐项对比，两个上位机之间也要一致；还对拍固件的副作用（设备时钟 / 段码屏显示 / 灯状态机 / 滚动动画 / KEY 计数），
+  HELLO 的时间用固定时刻 + 时区注入。细节和变异测试结果见 `tools/fwsim/README.md`。
 - 测自己的上位机：`tools/fwsim/build/fwsim` 第一行打印 `PTY /dev/ttysNNN`，把它当串口打开即可；stdin 发 `tap 3`（按一下 + 键）、
-  `stat`（屏上 CRC、缓冲块数、灯等，一行 JSON）。用的是 POSIX 伪终端（macOS / Linux；Windows 上可以在 WSL 里跑）。
+  `stat`（屏上 CRC、缓冲块数、段码屏显存、时钟、灯、滚动等，一行 JSON）。用的是 POSIX 伪终端（macOS / Linux；Windows 上可以在 WSL 里跑）。
 
 ## 以后
 

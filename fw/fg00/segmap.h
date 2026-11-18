@@ -5,7 +5,7 @@
  * 全部段已实机确认 (2026-11-18)。电池四格 A(0x2c) 最左 → D(0x2f) 最右, 实机确认。实机 segprobe(2026-11-18): 30 个单段以外的位全部不亮, 没有固定图标。 */
 #ifndef FG00_SEGMAP_H
 #define FG00_SEGMAP_H
-#include "fg00.h"
+#include "fgbuf.h"
 
 /* 数字列 (证实) */
 #define FG_COL_MAIN(i) (i)          /* 主数字 6 位, i=0..5 (左->右) */

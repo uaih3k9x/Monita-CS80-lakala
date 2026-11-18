@@ -9,7 +9,8 @@
  * stdin 一行一条控制命令, 每条回一行:
  *   tap K [ms]    按一下键 K (1 查询/PWRKEY, 2 ≡, 3 +, 4 −), 按住 ms (默认 60)  -> ok
  *   down K / up K 按下 / 松开                                                       -> ok
- *   stat          一行 JSON: 屏上 CRC、缓冲块数、沉浸模式、灯、段码屏、收拢次数 ...
+ *   stat          一行 JSON: 屏上 CRC、缓冲块数、沉浸模式、收拢次数、段码屏显存 + 本地时钟、灯状态机 (三色 / 闪烁相位)、
+ *                 滚动动画 (起点 / 目标 / 时长 / 进度)、KEY 计数 ... (字段见 tools/fwsim/README.md)
  *   quit          退出 (stdin 关掉也退出)
  */
 #define _DARWIN_C_SOURCE
@@ -48,14 +49,27 @@ static void cmd(char *line){
     if (n < 1) return;
     if (!strcmp(op, "quit")) exit(0);
     if (!strcmp(op, "stat")){
-        printf("{\"screen_crc\":%u,\"nbuf\":%u,\"imm\":%d,\"roll_rows\":%u,\"led\":%u,\"backlight\":%u,"
-               "\"seg_writes\":%u,\"clock_set\":%u,\"clock_unix\":%u,\"clock_tz\":%d,\"collapse\":%u,\"uncollapse\":%u,"
+        uint32_t t = now_ms();
+        char fg[2 * 72 + 1];
+        for (int i = 0; i < 72; i++) snprintf(fg + 2 * i, 3, "%02x", fg_fb[i]);
+        printf("{\"screen_crc\":%u,\"nbuf\":%u,\"imm\":%d,\"roll_rows\":%u,\"led\":%u,\"backlight\":%u,\"bl_writes\":%u,"
+               "\"seg_writes\":%u,\"collapse\":%u,\"uncollapse\":%u,"
                "\"link_up\":%u,\"rx_bytes\":%u,\"frames\":%u,\"crc_err\":%u,\"len_err\":%u,\"rects\":%u,\"presents\":%u,"
-               "\"bad_param\":%u,\"flip_now\":%u,\"key_n\":%u}\n",
-               sim_screen_crc(), g_tb.n, g_imm, g_roll_rows, sim.led_mask, sim.backlight,
-               sim.seg_writes, sim.clock_set, sim.clock_unix, sim.clock_tz, sim.collapse, sim.uncollapse,
+               "\"bad_param\":%u,\"flip_now\":%u,\"key_n\":%u,\"boot_live\":%d,",
+               sim_screen_crc(), g_tb.n, g_imm, g_roll_rows, sim.led_mask, sim.backlight, sim.bl_writes,
+               sim.seg_writes, sim.collapse, sim.uncollapse,
                g_lw.up, st.rx_bytes, g_p.frames, g_p.crc_err, g_p.len_err, st.rects, st.presents,
-               st.bad_param, g_flip_now, g_key_n);
+               st.bad_param, g_flip_now, g_key_n, g_boot_live);
+        /* 段码屏显存 + 本地时钟 (segclock.h) */
+        printf("\"fg\":\"%s\",\"clk_valid\":%d,\"clk_sod\":%u,\"seg_host_seen\":%d,", fg, clk_valid, clk_sod, seg_host_seen);
+        /* 状态灯状态机 (led.h): 时间都是相对现在的 1.024 ms 单位 */
+        printf("\"led_mode\":%u,\"led_mask\":%u,\"led_lit\":%u,\"led_on\":%u,\"led_off\":%u,\"led_next_in\":%d,"
+               "\"led_timed\":%u,\"led_until_in\":%d,",
+               g_led.mode, g_led.mask, g_led.lit, g_led.on, g_led.off, (int32_t)(g_led.next - t),
+               g_led.timed, (int32_t)(g_led.until - t));
+        /* 沉浸模式滚动 (imm.h) */
+        printf("\"im_ys\":%u,\"im_ytgt\":%u,\"im_anim\":%u,\"im_y0\":%u,\"im_d\":%d,\"im_dur\":%u,\"im_elapsed\":%u,\"im_pos\":%u}\n",
+               g_im.ys, g_im.ytgt, g_im.anim, g_im.a_y0, g_im.a_d, g_im.a_dur, t - g_im.a_t0, im_pos(&g_im, t));
         fflush(stdout);
         return;
     }

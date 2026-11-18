@@ -71,6 +71,8 @@ final class DeviceLink {
     /// 收到 KEY 时调（持有 lock，只做排队）
     var onKey: ((KeyEvent) -> Void)?
     var isUp: Bool { lock.lock(); defer { lock.unlock() }; return port != nil }
+    /// HELLO 带的时间从这里取（--conformance 换成固定值，见 Conformance.swift）
+    var clock: () -> Date = { Date() }
 
     init(name: String, open: @escaping () -> LinkPort?) { self.name = name; self.open = open }
 
@@ -119,13 +121,7 @@ final class DeviceLink {
         if port != nil { return false }
         guard let p = open() else { return false }
         port = p; parser = FrameParser()
-        let now = Date()
-        let tz = TimeZone.current.secondsFromGMT(for: now) / 60
-        var pl: [UInt8] = []
-        let t = UInt32(truncatingIfNeeded: Int(now.timeIntervalSince1970))
-        for s in stride(from: 0, to: 32, by: 8) { pl.append(UInt8((t >> UInt32(s)) & 0xFF)) }
-        pl += [UInt8(UInt16(bitPattern: Int16(tz)) & 0xFF), UInt8(UInt16(bitPattern: Int16(tz)) >> 8)]
-        guard let r = call(LinkType.hello, pl, replyType: LinkType.helloAck), let h = HelloInfo(r) else {
+        guard let r = call(LinkType.hello, helloPayload(clock()), replyType: LinkType.helloAck), let h = HelloInfo(r) else {
             drop("HELLO 没有应答"); return false
         }
         guard h.protoSupported, h.width == screenW, h.height == screenH, h.pixfmt == 1 else { drop("协议版本 / 屏参数不符 \(h)"); return false }

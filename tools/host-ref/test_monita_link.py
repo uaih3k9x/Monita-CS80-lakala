@@ -1,5 +1,7 @@
 """python3 -m unittest discover -s tools/host-ref"""
+import os
 import struct
+import time
 import unittest
 import zlib
 
@@ -28,6 +30,34 @@ class FrameTests(unittest.TestCase):
         self.assertEqual((a["for_type"], a["rects"], a["extra"]), (0x21, 4, 8))
         h = ml.parse_hello_ack(struct.pack("<HHHHBBHHH", 0, 1, 800, 1280, 1, 72, 1, 32768, 0))
         self.assertEqual((h["w"], h["h"], h["max_payload"]), (800, 1280, 32768))
+
+
+class HelloTimeTests(unittest.TestCase):
+    """HELLO 带的时间: u32 unix 秒 + i16 本地 - UTC 分钟 (东正西负), 夏令时按那个时刻算"""
+
+    def setUp(self):
+        self.tz = os.environ.get("TZ")
+
+    def tearDown(self):
+        if self.tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self.tz
+        time.tzset()
+
+    def payload(self, zone, t):
+        os.environ["TZ"] = zone
+        time.tzset()
+        return struct.unpack("<Ih", ml.hello_payload(t))
+
+    def test_zones_and_dst(self):
+        summer, winter = 1784081587, 1768950309                 # 2026-07-15 02:13:07Z, 2026-01-20 23:05:09Z
+        self.assertEqual(self.payload("America/New_York", summer), (summer, -240))
+        self.assertEqual(self.payload("America/New_York", winter), (winter, -300))
+        self.assertEqual(self.payload("Asia/Kolkata", summer), (summer, 330))
+        self.assertEqual(self.payload("Europe/London", summer), (summer, 60))
+        self.assertEqual(self.payload("Australia/Adelaide", winter), (winter, 630))
+        self.assertEqual(self.payload("UTC", 1782907200.9), (1782907200, 0))
 
 
 class PixelTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 // Monita link 协议 v0 的纯逻辑 (docs/protocol.md)：编帧、流式拆帧、CRC-32、RGB565、脏 tile → 矩形打包。
 // 帧：A5 5A | u8 type | u8 seq | u16 len | payload | u32 crc32(type..payload)，全部小端。
 // 传输（串口）在 monita-cs80/SerialLink.swift。
+import Foundation
 
 public enum LinkType {
     public static let hello: UInt8 = 0x01, seg: UInt8 = 0x10, rect: UInt8 = 0x20, present: UInt8 = 0x21, copy: UInt8 = 0x22
@@ -104,6 +105,18 @@ public struct HelloInfo: Equatable {
         proto = rd16(p, 0); fw = rd16(p, 2); width = rd16(p, 4); height = rd16(p, 6)
         pixfmt = Int(p[8]); segBytes = Int(p[9]); caps = rd16(p, 10); maxPayload = rd16(p, 12)
     }
+}
+
+/// HELLO 的 6 字节：u32 unix 秒 + i16 本地时间 - UTC（分钟，东正西负；夏令时按 now 那一刻）
+public func helloPayload(_ now: Date, timeZone: TimeZone = .current) -> [UInt8] {
+    let t = UInt32(truncatingIfNeeded: Int(now.timeIntervalSince1970))
+    let tz = UInt16(bitPattern: Int16(timeZone.secondsFromGMT(for: now) / 60))
+    return [UInt8(t & 0xFF), UInt8(t >> 8 & 0xFF), UInt8(t >> 16 & 0xFF), UInt8(t >> 24), UInt8(tz & 0xFF), UInt8(tz >> 8)]
+}
+
+/// 同上，时区按 IANA 名字（单测用，测试目标里不 import Foundation）；不认识的名字返回 nil
+public func helloPayload(unixTime: Double, zone: String) -> [UInt8]? {
+    TimeZone(identifier: zone).map { helloPayload(Date(timeIntervalSince1970: unixTime), timeZone: $0) }
 }
 
 /// PRESENT 的 ACK：status 要是 0（沉浸模式里回 1），出错计数（CRC / 长度 / 被拒）也没比基线多

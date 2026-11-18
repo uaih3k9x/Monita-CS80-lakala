@@ -5,10 +5,15 @@
 按键注入、未知 type、DIAG、坏帧、沉浸模式 ...), 结果和 expected() (照 docs/protocol.md 写的) 逐项对比,
 两个上位机的结果也要完全一样。一般用 tools/fwsim/run.sh 跑。
 
+协议回包之外还看模拟器里固件的副作用 (stat): 脚本走到 "hello" / "seg" / "led" ... 这些点时 (Swift 打印 "@stat 名字"
+等 harness 回一行) 取一次 stat, 归一成和时间无关的值放进结果的 "sim" (见 Probe)。HELLO 带的时间用每种配置固定的
+时刻 + 时区 (CONFIGS 的 now / zone), 不依赖真实时间。
+
   python3 tools/fwsim/conformance.py --sim tools/fwsim/build/fwsim [--swift mac/.build/debug/monita-cs80]
 """
 import argparse
 import array
+import datetime
 import json
 import os
 import struct
@@ -16,6 +21,7 @@ import subprocess
 import sys
 import time
 import zlib
+import zoneinfo
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "tools", "host-ref"))
@@ -54,6 +60,128 @@ def strips(h, max_payload):
     return len(ml.imm_strips(0, h, W, max_payload))
 
 
+SEG_PAT = bytes((i * 37 + 11) & 0xFF for i in range(72))     # 和 Conformance.swift 的 segPattern 一致
+
+
+# ---- 段码屏显存 (fw/fg00/fgbuf.h, segmap.h) ----
+
+FG_HEX = [0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f, 0x77, 0x7c, 0x39, 0x5e, 0x79, 0x71]
+SEG_CHARS = {**{m: "0123456789abcdef"[i] for i, m in enumerate(FG_HEX)}, 0x40: "-", 0: " "}
+SEG_MASKS = {c: m for m, c in SEG_CHARS.items()}
+CLK_COLONS = ((63, 0x08), (65, 0x08))                       # FG_SEG_CLK_COLON_A / _B
+
+
+def fg_digit_mask(fg, k):
+    c0, c1, c2, c3 = fg[k], fg[18 + k], fg[36 + k], fg[54 + k]
+    bits = ((c1 & 0x80, 0x01), (c1 & 0x08, 0x02), (c2 & 0x08, 0x04), (c3 & 0x80, 0x08),
+            (c2 & 0x80, 0x10), (c0 & 0x80, 0x20), (c0 & 0x08, 0x40))
+    return sum(m for on, m in bits if on)
+
+
+def seg_render(main, clk):
+    """固件 seg_draw_local 应该画出的 72 字节: 主区 6 位 + 小时钟 "hh:mm:ss" (或空)"""
+    fg = bytearray(72)
+    digits = list(enumerate(main)) + [(8 + i, c) for i, c in enumerate(clk.replace(":", ""))]
+    for k, ch in digits:
+        m = SEG_MASKS[ch]
+        for on, (i, b) in ((m & 0x20, (k, 0x80)), (m & 0x40, (k, 0x08)), (m & 0x01, (18 + k, 0x80)), (m & 0x02, (18 + k, 0x08)),
+                           (m & 0x10, (36 + k, 0x80)), (m & 0x04, (36 + k, 0x08)), (m & 0x08, (54 + k, 0x80))):
+            if on:
+                fg[i] |= b
+    if clk:
+        for i, b in CLK_COLONS:
+            fg[i] |= b
+    return bytes(fg)
+
+
+def seg_text(fg):
+    """段码屏读成 "主区 小时钟"; 有 seg_render 画不出来的位 (多亮 / 少亮的段) 就原样给十六进制"""
+    main = "".join(SEG_CHARS.get(fg_digit_mask(fg, k), "?") for k in range(6))
+    clk = "".join(SEG_CHARS.get(fg_digit_mask(fg, 8 + k), "?") for k in range(6))
+    clk = "" if clk == " " * 6 else "%s:%s:%s" % (clk[0:2], clk[2:4], clk[4:6])
+    try:
+        if seg_render(main, clk) == bytes(fg):
+            return (main + " " + clk).rstrip()
+    except KeyError:
+        pass
+    return "raw:" + bytes(fg).hex()
+
+
+def hms(sod):
+    return "%02d:%02d:%02d" % (sod // 3600, sod // 60 % 60, sod % 60)
+
+
+def local_sod(now, zone):
+    t = datetime.datetime.fromtimestamp(now, zoneinfo.ZoneInfo(zone))
+    return t.hour * 3600 + t.minute * 60 + t.second
+
+
+def led_state(st):
+    """灯状态机 (led.h) 归一: 灭 [0, 输出灭了]; 常亮 [1, mask, timed, 输出=mask];
+    闪烁 [2, mask, on, off, timed, 相位对 (输出 = lit ? mask : 0, 下次翻转在这一段时长以内)]"""
+    mode, mask, out = st["led_mode"], st["led_mask"], st["led"]
+    if mode == 0:
+        return [0, out == 0]
+    if mode == 1:
+        return [1, mask, st["led_timed"], out == mask]
+    span = st["led_on"] if st["led_lit"] else st["led_off"]
+    phase = out == (mask if st["led_lit"] else 0) and 0 < st["led_next_in"] <= span
+    return [mode, mask, st["led_on"], st["led_off"], st["led_timed"], phase]
+
+
+class Probe:
+    """脚本走到某一步时看一眼模拟器里固件的状态, 归一成和时间无关的值 (self.out[名字])"""
+
+    def __init__(self, sim, cfg):
+        self.sim, self.cfg, self.out = sim, cfg, {}
+        self.want_sod = local_sod(cfg["now"], cfg["zone"])
+        self.hello_at = self.seg_at = None
+
+    def __call__(self, label):
+        st = self.sim.stat()
+        t = time.monotonic()
+        fg = bytes.fromhex(st["fg"])
+        clock = st["clk_valid"] == 1 and seg_text(fg) == "------ " + hms(st["clk_sod"])
+        if label == "boot":                                  # 上位机连上之前
+            v = dict(seg=seg_text(fg), clk_valid=st["clk_valid"], led=led_state(st), backlight=[st["backlight"], st["bl_writes"]],
+                     link_up=st["link_up"], boot_live=st["boot_live"])
+        elif label == "hello":                               # 第一条 HELLO (带时间) 之后
+            d = (st["clk_sod"] - self.want_sod) % 86400       # HELLO 之后过了不到 1 s
+            self.hello_at = (t, st["clk_sod"])
+            v = dict(clk=True if st["clk_valid"] and d <= 2 else [st["clk_valid"], hms(st["clk_sod"]), hms(self.want_sod)],
+                     seg_clock=clock or seg_text(fg), led=led_state(st), key_n=st["key_n"], link_up=st["link_up"],
+                     boot_live=st["boot_live"])
+        elif label == "seg":                                 # SEG (图案) + SEG (71 B, 被拒) 之后
+            self.seg_at = t
+            v = dict(fg=True if fg == SEG_PAT else fg.hex(), seg_host_seen=st["seg_host_seen"])
+        elif label == "keys":                                # 按键注入完 (SEG 之后 1.5 s 多): 主机的 SEG 还没被本地时钟盖掉
+            dt = t - self.seg_at
+            v = dict(seg_held=(fg == SEG_PAT) if 1.05 < dt < 4.8 else "SEG 之后 %.2f s, 不在 (1.05, 4.8)" % dt)
+        elif label == "backlight":                           # BACKLIGHT 0 + 空 BACKLIGHT (被拒)
+            v = [st["backlight"], st["bl_writes"]]
+        elif label == "led":                                 # 绿灯闪 500/100 + 两条被拒的
+            v = led_state(st)
+        elif label == "imm_anim":                            # IMM_SCROLL 300 -> 320, 100 ms 刚 ACK
+            v = [st["im_ytgt"], st["im_y0"], st["im_d"], st["im_dur"], 300 <= st["im_pos"] <= 320]
+        elif label == "rehello":                             # 不带时间的 HELLO: KEY 计数清零、灯交还主机、时钟照走
+            v = dict(key_n=st["key_n"], led=led_state(st), clk_valid=st["clk_valid"], link_up=st["link_up"])
+        elif label == "end":                                 # 会话结束: 时钟按秒走; SEG 5 s 没续就回本地时钟
+            if self.seg_at is not None:
+                time.sleep(max(0.0, self.seg_at + 6.2 - time.monotonic()))
+                st = self.sim.stat()
+                fg, t = bytes.fromhex(st["fg"]), time.monotonic()
+                clock = st["clk_valid"] == 1 and seg_text(fg) == "------ " + hms(st["clk_sod"])
+            if self.hello_at is None:
+                self.out[label] = "没有 hello 那一步"
+                return
+            t0, s0 = self.hello_at
+            d = (st["clk_sod"] - s0) % 86400
+            v = dict(tick=True if abs(d - (t - t0)) <= 1.5 else [d, round(t - t0, 2)], seg_clock=clock or seg_text(fg))
+        else:
+            raise ValueError(label)
+        self.out[label] = v
+
+
 # ---- 模拟器 ----
 
 class Sim:
@@ -87,10 +215,12 @@ def errs(a):
     return a["crc_err"] + a["len_err"] + a["bad_param"]
 
 
-def python_session(sim):
+def python_session(sim, probe, now):
     link = ml.Link(sim.pty)
+    link.clock = lambda: now
     res = {}
     info = link.hello()
+    probe("hello")
     res["hello"] = {k: info[k] for k in ("proto", "fw", "w", "h", "pixfmt", "seg_bytes", "caps", "max_payload")}
     base = [0]
 
@@ -137,11 +267,14 @@ def python_session(sim):
                        sub_fbcrc_ok=fbcrc(41, 40, 33, 17)["extra"] == region_crc(b, 41, 40, 33, 17))
     res["fbcrc_bad"] = fbcrc(799, 0, 2, 1)["status"]
 
-    res["seg"] = [link.call(ml.SEG, bytes(72))["status"], link.call(ml.SEG, bytes(71))["status"]]
-    res["backlight"] = [link.call(ml.BACKLIGHT, b"\x01")["status"], link.call(ml.BACKLIGHT)["status"]]
+    res["seg"] = [link.call(ml.SEG, SEG_PAT)["status"], link.call(ml.SEG, bytes(71))["status"]]
+    probe("seg")
+    res["backlight"] = [link.call(ml.BACKLIGHT, b"\x00")["status"], link.call(ml.BACKLIGHT)["status"]]
+    probe("backlight")
     res["led"] = [link.led(ml.LED_G, ml.LED_BLINK, 500, 100)["status"],
                   link.call(ml.LED, bytes([8, 1, 0, 0, 0, 0, 0, 0]))["status"],
                   link.call(ml.LED, bytes([1, 2, 100, 0, 100, 0, 0, 0]))["status"]]
+    probe("led")
 
     keys = []
     for k, ms, n in ((3, 60, 2), (1, 1300, 5)):
@@ -150,6 +283,7 @@ def python_session(sim):
         while len(keys) < n and time.monotonic() < end:
             keys += [[e["key"], e["ev"], e["n"]] for e in link.poll_keys(0.05)]
     res["keys"] = keys
+    probe("keys")
 
     u = link.call(0x55)
     res["unknown"] = dict(for_type=u["for_type"], status=u["status"])
@@ -164,16 +298,17 @@ def python_session(sim):
                          half=delta([0xA5, 0x5A, ml.PING, 0x37, 4, 0, 1, 2], sleep=0.7))
 
     if info["caps"] & ml.CAP_IMMERSIVE:
-        res["imm"] = python_imm(link, push, fbcrc, a, base)
+        res["imm"] = python_imm(link, push, fbcrc, a, base, probe)
 
     link.wait(ml.HELLO_ACK, link.send(ml.HELLO))
     p2 = link.ping()
     res["rehello"] = dict(ok=True, frames=p2["frames"], rx_bytes=p2["rx_bytes"])
+    probe("rehello")
     link.close()
     return res
 
 
-def python_imm(link, push, fbcrc, a, base):
+def python_imm(link, push, fbcrc, a, base, probe):
     r = {}
     e = link.imm_enter(0)
     r["enter"] = [e["status"], e["extra"]]
@@ -219,6 +354,7 @@ def python_imm(link, push, fbcrc, a, base):
     p3 = link.ping()
     r["vis"] = [p3["bad_param"] - p2["bad_param"], p3["rects"] - p2["rects"]]
     r["anim"] = scroll(320, 100)
+    probe("imm_anim")
     time.sleep(0.3)
     r["crc320"] = crc_is(320)
     write(1600, R + 200 - 1600, False, pat_row)
@@ -239,13 +375,19 @@ def python_imm(link, push, fbcrc, a, base):
 
 # ---- Swift 上位机 ----
 
-def swift_session(sim, exe):
-    p = subprocess.Popen([exe, "--device", sim.pty, "--conformance"], stdout=subprocess.PIPE, text=True)
+def swift_session(sim, probe, now, zone, exe):
+    env = dict(os.environ, TZ=zone, MONITA_FAKE_NOW=str(now))
+    p = subprocess.Popen([exe, "--device", sim.pty, "--conformance"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         text=True, env=env)
     res = None
     for line in p.stdout:
         if line.startswith("@key "):
             _, k, ms = line.split()
             sim.cmd("tap %s %s" % (k, ms))
+        elif line.startswith("@stat "):
+            probe(line.split()[1])
+            p.stdin.write("\n")
+            p.stdin.flush()
         elif line.startswith("@result "):
             res = json.loads(line[len("@result "):])
         else:
@@ -284,6 +426,14 @@ def expected(cfg):
                        garbage=[1, 0, 0, 15],
                        half=[1, 0, 0, 18]),       # 半截帧 0.5 s 没后续就丢
         "rehello": dict(ok=True, frames=2, rx_bytes=10),
+        # 模拟器里固件的副作用 (Probe): 开机蓝灯 2 s 亮 1 s 灭 (1.024 ms 单位 2000/1000)、段码屏 "------";
+        # HELLO 后小时钟 = 固定时刻在 zone 的当地时间, 灯灭; SEG 原样进显存; LED 生效、被拒的不动它;
+        # 再 HELLO: KEY 计数清零、灯灭; 时钟按秒走, SEG 5 s 后回本地时钟
+        "sim": dict(boot=dict(seg="------", clk_valid=0, led=[2, ml.LED_B, 2000, 1000, 0, True], backlight=[1, 1],
+                              link_up=0, boot_live=1),
+                    hello=dict(clk=True, seg_clock=True, led=[0, True], key_n=0, link_up=1, boot_live=0),
+                    seg=dict(fg=True, seg_host_seen=1), keys=dict(seg_held=True), backlight=[0, 2], led=[2, ml.LED_G, 100, 400, 0, True],
+                    rehello=dict(key_n=0, led=[0, True], clk_valid=1, link_up=1), end=dict(tick=True, seg_clock=True)),
     }
     if rows < 1280 + 256:
         e["imm"] = {"enter": [ml.EUNSUP, 0]}
@@ -292,6 +442,7 @@ def expected(cfg):
                         scroll0=[0, 0], crc0=True, scroll300=[0, 0], crc300=True, vis=[1, 1], anim=[0, 300], crc320=True,
                         far=[0, strips(rows + 200 - 1600, mp)], scroll1600=[0, 320], crc1600=True, out=ml.EPARAM, sub=True,
                         exit=[0, caps], crc_exit=True, caps_after=caps, after=[True, True])
+        e["sim"]["imm_anim"] = [320, 300, 20, 100, True]
     return e
 
 
@@ -310,11 +461,16 @@ def diff(want, got, path=""):
     return out
 
 
+# now / zone: HELLO 带的时间 (固定, 不用真实时间)。西半球夏令时跨日、半小时时区、东半球夏令时 (南半球一月)、+1 h
 CONFIGS = [
-    dict(name="三缓冲", args=[], nbuf=3, max_payload=32768, imm_rows=2720),
-    dict(name="单缓冲", args=["--nbuf", "1"], nbuf=1, max_payload=32768, imm_rows=2720),
-    dict(name="双缓冲 + max_payload 16 KiB", args=["--nbuf", "2", "--max-payload", "16384"], nbuf=2, max_payload=16384, imm_rows=2720),
-    dict(name="卷轴不够 (IMM_ENTER 被拒)", args=["--imm-rows", "1000"], nbuf=3, max_payload=32768, imm_rows=1000),
+    dict(name="三缓冲", args=[], nbuf=3, max_payload=32768, imm_rows=2720,
+         now=1784081587, zone="America/New_York"),            # 2026-07-15 02:13:07Z = 前一天 22:13:07 EDT (-240)
+    dict(name="单缓冲", args=["--nbuf", "1"], nbuf=1, max_payload=32768, imm_rows=2720,
+         now=1784141251, zone="Asia/Kolkata"),                # 18:47:31Z = 次日 00:17:31 IST (+330)
+    dict(name="双缓冲 + max_payload 16 KiB", args=["--nbuf", "2", "--max-payload", "16384"], nbuf=2, max_payload=16384,
+         imm_rows=2720, now=1784141251, zone="Europe/London"), # 19:47:31 BST (+60)
+    dict(name="卷轴不够 (IMM_ENTER 被拒)", args=["--imm-rows", "1000"], nbuf=3, max_payload=32768, imm_rows=1000,
+         now=1768950309, zone="Australia/Adelaide"),          # 2026-01-20 23:05:09Z = 次日 09:35:09 ACDT (+630)
 ]
 
 
@@ -335,12 +491,20 @@ def main():
         cfg["fw"] = fw_ver()
         want = expected(cfg)
         got = {}
-        hosts = [("python", python_session)] + ([("swift", lambda s: swift_session(s, args.swift))] if args.swift else [])
+        os.environ["TZ"] = cfg["zone"]                        # Python 上位机按这个时区算 HELLO 的 tz
+        time.tzset()
+        hosts = [("python", lambda s, p: python_session(s, p, cfg["now"]))]
+        if args.swift:
+            hosts.append(("swift", lambda s, p: swift_session(s, p, cfg["now"], cfg["zone"], args.swift)))
         for host, run in hosts:
             sim = Sim(args.sim, cfg["args"])
             t0 = time.monotonic()
             try:
-                got[host] = run(sim)
+                probe = Probe(sim, cfg)
+                probe("boot")
+                got[host] = run(sim, probe)
+                probe("end")
+                got[host]["sim"] = probe.out
                 st = sim.stat()
             finally:
                 sim.close()

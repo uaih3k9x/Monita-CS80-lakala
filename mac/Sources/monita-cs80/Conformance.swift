@@ -1,6 +1,8 @@
 // --conformance：对着固件模拟器（tools/fwsim）跑一遍和 Python 参考实现同样的脚本，
 // 最后打印一行 "@result {json}"，由 tools/fwsim/conformance.py 和 Python 那一份、和 docs/protocol.md 对照。
-// 要模拟器按键时打印 "@key K ms"（harness 收到后让模拟器按一下键）。
+// 要模拟器按键时打印 "@key K ms"（harness 收到后让模拟器按一下键）；
+// 打印 "@stat 名字" 后等 stdin 一行：harness 在这一步看一眼模拟器里固件的状态（灯、段码屏、时钟、滚动 …）。
+// HELLO 带的时间：环境变量 MONITA_FAKE_NOW（unix 秒）+ TZ，由 harness 给固定值。
 // 走的都是渲染器真正用的代码：DeviceLink（HELLO / push / request / send / setFlipNow）、MonitaCore 的编码。
 // 不是给真设备用的：会切沉浸模式、发坏帧。
 import Foundation
@@ -12,6 +14,12 @@ private func patB(_ x: Int, _ y: Int) -> UInt16 { UInt16(((x * 3 + y * 5) & 0xFF
 private func patRow(_ row: Int, _ x: Int) -> UInt16 { UInt16((row * 7 + x * 3) & 0xFFFF) }
 private func patVis(_ row: Int, _ x: Int) -> UInt16 { UInt16(((row * 11 + x) & 0xFFFF) ^ 0xA5A5) }
 
+/// 和 conformance.py 的 SEG_PAT 一致
+private let segPattern: [UInt8] = (0..<72).map { UInt8(($0 * 37 + 11) & 0xFF) }
+
+/// 让 harness 看一眼模拟器状态，等它回一行再往下走
+private func snap(_ label: String) { print("@stat \(label)"); fflush(stdout); _ = readLine() }
+
 private func frameA() -> [UInt16] {
     var b = [UInt16](repeating: 0, count: screenW * screenH)
     for y in 0..<screenH { for x in 0..<screenW { b[y * screenW + x] = patA(x, y) } }
@@ -22,12 +30,16 @@ func runConformance(_ link: DeviceLink) -> Bool {
     var keys: [[Int]] = []
     link.onKey = { e in keys.append([Int(e.key.rawValue), Int(e.edge.rawValue), e.count]) }
     var res: [String: Any] = [:]
+    if let v = ProcessInfo.processInfo.environment["MONITA_FAKE_NOW"], let t = Double(v) {
+        link.clock = { Date(timeIntervalSince1970: t) }
+    }
     let t0 = Date()
     while !link.connectIfNeeded() {
         if Date().timeIntervalSince(t0) > 5 { print("@result {\"error\":\"HELLO 失败\"}"); return false }
         Thread.sleep(forTimeInterval: 0.2)
     }
     guard let info = link.info else { return false }
+    snap("hello")
     res["hello"] = ["proto": info.proto, "fw": info.fw, "w": info.width, "h": info.height, "pixfmt": info.pixfmt,
                     "seg_bytes": info.segBytes, "caps": info.caps, "max_payload": info.maxPayload]
 
@@ -74,11 +86,14 @@ func runConformance(_ link: DeviceLink) -> Bool {
                    "sub_fbcrc_ok": fbcrc(41, 40, 33, 17).extra == fbRegionCRC(b, x: 41, y: 40, w: 33, h: 17)]
     res["fbcrc_bad"] = Int(fbcrc(799, 0, 2, 1).status)
 
-    res["seg"] = [Int(ack(LinkType.seg, [UInt8](repeating: 0, count: 72))!.status), Int(ack(LinkType.seg, [UInt8](repeating: 0, count: 71))!.status)]
-    res["backlight"] = [Int(ack(LinkType.backlight, [1])!.status), Int(ack(LinkType.backlight, [])!.status)]
+    res["seg"] = [Int(ack(LinkType.seg, segPattern)!.status), Int(ack(LinkType.seg, [UInt8](repeating: 0, count: 71))!.status)]
+    snap("seg")
+    res["backlight"] = [Int(ack(LinkType.backlight, [0])!.status), Int(ack(LinkType.backlight, [])!.status)]
+    snap("backlight")
     res["led"] = [Int(ack(LinkType.led, [2, 2, 0xF4, 0x01, 100, 0, 0, 0])!.status),   // 绿灯闪 500/100
                   Int(ack(LinkType.led, [8, 1, 0, 0, 0, 0, 0, 0])!.status),            // mask 位不对
                   Int(ack(LinkType.led, [1, 2, 100, 0, 100, 0, 0, 0])!.status)]        // on >= period
+    snap("led")
 
     // 按键：模拟器按一下 +，再长按查询键
     func waitKeys(_ n: Int) {
@@ -88,6 +103,7 @@ func runConformance(_ link: DeviceLink) -> Bool {
     print("@key 3 60"); fflush(stdout); waitKeys(2)
     print("@key 1 1300"); fflush(stdout); waitKeys(5)
     res["keys"] = keys
+    snap("keys")
 
     let u = ack(0x55)!
     res["unknown"] = ["for_type": Int(u.forType), "status": Int(u.status)]
@@ -108,6 +124,7 @@ func runConformance(_ link: DeviceLink) -> Bool {
     let h2 = link.request(LinkType.hello, [], replyType: LinkType.helloAck)
     let p2 = ping()
     res["rehello"] = ["ok": h2 != nil, "frames": Int(p2.frames), "rx_bytes": Int(p2.rxBytes)]
+    snap("rehello")
 
     guard let data = try? JSONSerialization.data(withJSONObject: res, options: [.sortedKeys]), let s = String(data: data, encoding: .utf8) else { return false }
     print("@result " + s)
@@ -156,6 +173,7 @@ private func immSession(_ link: DeviceLink, ack: (UInt8, [UInt8]) -> AckStats?, 
     let p3 = ping()
     r["vis"] = [Int(p3.badParam - p2.badParam), Int(p3.rects - p2.rects)]
     r["anim"] = scroll(320, 100)
+    snap("imm_anim")
     Thread.sleep(forTimeInterval: 0.3)
     r["crc320"] = crcIs(320)
     write(1600, R + 200 - 1600, visible: false, patRow)       // 写过卷轴末尾：固件就地换底

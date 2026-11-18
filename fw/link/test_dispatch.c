@@ -65,6 +65,60 @@ static void test_unknown_and_ping(void){
     CHECK(next_reply() && rx_type == LK_ACK && rx_pl[0] == LK_PING && rx_pl[1] == LK_OK);
 }
 
+/* 段码屏第 k 列读回 7 段掩码 (fgbuf.h fg_digit 的逆) */
+static uint8_t digit_at(int k){
+    uint8_t c0 = fg_fb[k], c1 = fg_fb[18 + k], c2 = fg_fb[36 + k], c3 = fg_fb[54 + k];
+    return (uint8_t)((c1 & 0x80 ? 0x01 : 0) | (c1 & 0x08 ? 0x02 : 0) | (c2 & 0x08 ? 0x04 : 0) | (c3 & 0x80 ? 0x08 : 0)
+                   | (c2 & 0x80 ? 0x10 : 0) | (c0 & 0x80 ? 0x20 : 0) | (c0 & 0x08 ? 0x40 : 0));
+}
+static int clock_shows(const char *hms){                /* "hhmmss" */
+    for (int i = 0; i < 6; i++) if (digit_at(FG_COL_CLK(i)) != fg_hex[hms[i] - '0']) return 0;
+    for (int i = 0; i < 6; i++) if (digit_at(FG_COL_MAIN(i)) != SEG_DASH) return 0;
+    return (fg_fb[FG_SEG_CLK_COLON_A >> 8] & (FG_SEG_CLK_COLON_A & 0xFF)) && (fg_fb[FG_SEG_CLK_COLON_B >> 8] & (FG_SEG_CLK_COLON_B & 0xFF));
+}
+static void tick_s(uint32_t s){ for (uint32_t i = 0; i < 10 * s; i++){ sim_t_us += 100000u; sim_tick(); } }
+
+/* HELLO 带时间: 设备时钟 = 当地时间 (unix + tz), 段码屏小时钟跟着走; 灯灭、KEY 计数清零 */
+static void test_hello_clock(void){
+    uint8_t pl[6];
+    lk_wr16(pl, 1784081587u & 0xFFFF); lk_wr16(pl + 2, 1784081587u >> 16); lk_wr16(pl + 4, (uint16_t)-240);   /* 02:13:07Z, EDT */
+    g_key_n = 7;
+    send(LK_HELLO, pl, 6);
+    CHECK(next_reply() && rx_type == LK_HELLO_ACK);
+    CHECK(clk_valid && clk_sod == 22 * 3600 + 13 * 60 + 7);
+    CHECK(clock_shows("221307"));
+    CHECK(g_key_n == 0 && g_led.mode == LED_MODE_OFF && sim.led_mask == 0);
+    tick_s(1);
+    CHECK(clk_sod == 22 * 3600 + 13 * 60 + 8 && clock_shows("221308"));
+    lk_wr16(pl + 4, 330);                                /* IST: 07:43:07, 东正 */
+    send(LK_HELLO, pl, 6);
+    CHECK(next_reply() && clk_sod == 7 * 3600 + 43 * 60 + 7 && clock_shows("074307"));
+    uint32_t mid = 1784073599u;                          /* 2026-07-14 23:59:59Z */
+    lk_wr16(pl, mid & 0xFFFF); lk_wr16(pl + 2, mid >> 16); lk_wr16(pl + 4, 0);
+    send(LK_HELLO, pl, 6);
+    CHECK(next_reply() && clock_shows("235959"));
+    tick_s(1);
+    CHECK(clk_sod == 0 && clock_shows("000000"));      /* 过零点回绕 */
+    send(LK_HELLO, 0, 0);                                /* 不带时间的 HELLO: 时钟照走 */
+    CHECK(next_reply() && clk_valid && clk_sod == 0);
+}
+
+/* 主机走了 (15 s 没字节) -> 蓝灯心跳; 又来字节 (没 HELLO) -> 恢复主机设的灯; 沉浸模式里来 HELLO -> 退回普通模式 */
+static void test_link_lost_and_rehello(void){
+    const uint8_t green[8] = { LED_G, LED_MODE_ON, 0, 0, 0, 0, 0, 0 };
+    send(LK_LED, green, 8);
+    CHECK(next_reply() && rx_pl[1] == LK_OK && g_led.mode == LED_MODE_ON && sim.led_mask == LED_G);
+    tick_s(16);
+    CHECK(!g_lw.up && g_led.mode == LED_MODE_BLINK && g_led.mask == LED_B);
+    send(LK_PING, 0, 0);
+    CHECK(next_reply() && g_lw.up && g_led.mode == LED_MODE_ON && g_led.mask == LED_G && sim.led_mask == LED_G);
+    uint8_t y0[4] = { 0, 0, 0, 0 };
+    send(LK_IMM_ENTER, y0, 4);
+    CHECK(next_reply() && rx_pl[1] == LK_OK && g_imm);
+    send(LK_HELLO, 0, 0);
+    CHECK(next_reply() && rx_type == LK_HELLO_ACK && !g_imm && g_tb.n == 3);
+}
+
 int main(void){
     sim_virtual = 1; sim_t_us = 1000000u;
     rxp.buf = rx_pl;
@@ -73,6 +127,8 @@ int main(void){
     test_hello();
     test_empty_diag();
     test_unknown_and_ping();
+    test_hello_clock();
+    test_link_lost_and_rehello();
     printf("dispatch: %s\n", fails ? "FAILED" : "all OK");
     return fails ? 1 : 0;
 }

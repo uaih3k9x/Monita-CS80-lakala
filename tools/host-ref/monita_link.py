@@ -207,6 +207,12 @@ def open_port(port):
     return serial.Serial(port, 115200, timeout=0.05, write_timeout=30)
 
 
+def hello_payload(t):
+    """HELLO 的 6 字节: u32 unix 秒, i16 本地时间 - UTC (分钟, 东正西负; 夏令时按 t 那一刻)"""
+    tz = -time.altzone if time.localtime(t).tm_isdst > 0 else -time.timezone
+    return struct.pack("<Ih", int(t), tz // 60)
+
+
 class Link:
     """port: 串口名 (COMx / /dev/tty*), 或者已经打开的对象 (要有 read / write / in_waiting / reset_input_buffer / close)"""
 
@@ -217,6 +223,7 @@ class Link:
         self.parser = Parser()
         self.info = None
         self.keys = []                  # 收到的 KEY (parse_key 的 dict), 调用方自己取走
+        self.clock = time.time          # HELLO 带的时间从这里取 (对拍脚本换成固定值)
         self.ser.reset_input_buffer()
 
     def close(self):
@@ -262,10 +269,7 @@ class Link:
         return parse_ack(self.wait(ACK, self.send(ftype, payload), timeout))
 
     def hello(self, with_time=True):
-        pl = b""
-        if with_time:
-            tz = -time.altzone if time.localtime().tm_isdst > 0 else -time.timezone
-            pl = struct.pack("<Ih", int(time.time()), tz // 60)
+        pl = hello_payload(self.clock()) if with_time else b""
         self.info = parse_hello_ack(self.wait(HELLO_ACK, self.send(HELLO, pl)))
         if self.info["proto"] != PROTO_VER:
             warnings.warn("设备 proto_ver = %d, 这份参考实现只认 %d" % (self.info["proto"], PROTO_VER))

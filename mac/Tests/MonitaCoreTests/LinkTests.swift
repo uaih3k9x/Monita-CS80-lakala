@@ -121,3 +121,20 @@ import MonitaCore
     #expect(ps[0] == immRectPayload(y: 1003, x: 0, w: 800, rows: 3..<13, visible: true, buf, width: 800))
     #expect(ps[2] == immRectPayload(y: 1023, x: 0, w: 800, rows: 23..<25, visible: true, buf, width: 800))
 }
+
+/// HELLO 带的时间：u32 unix 秒 + i16 本地 - UTC 分钟（东正西负），夏令时按那一刻算（同 tools/host-ref test_zones_and_dst）
+@Test func helloPayloadZonesAndDST() {
+    func pl(_ zone: String, _ t: Double) -> (UInt32, Int16) {
+        let b = helloPayload(unixTime: t, zone: zone) ?? []
+        #expect(b.count == 6)
+        let u = UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
+        return (u, Int16(bitPattern: UInt16(b[4]) | UInt16(b[5]) << 8))
+    }
+    let summer = 1784081587.0, winter = 1768950309.0           // 2026-07-15 02:13:07Z, 2026-01-20 23:05:09Z
+    #expect(pl("America/New_York", summer) == (1784081587, -240))
+    #expect(pl("America/New_York", winter) == (1768950309, -300))
+    #expect(pl("Asia/Kolkata", summer) == (1784081587, 330))
+    #expect(pl("Europe/London", summer) == (1784081587, 60))
+    #expect(pl("Australia/Adelaide", winter) == (1768950309, 630))
+    #expect(pl("UTC", 1782907200.9) == (1782907200, 0))
+}
