@@ -1,0 +1,11 @@
+# fg00 段码屏驱动 + uart 进度标记(port4)。定位段码屏 init 在哪一步挂/完成。
+ql_pin_set_func
+ql_gpio_init
+ql_gpio_deinit
+ql_gpio_set_level
+ql_gpio_set_direction
+ql_delay_us
+ql_rtos_task_create
+ql_rtos_task_sleep_ms
+ql_uart_open
+ql_uart_write

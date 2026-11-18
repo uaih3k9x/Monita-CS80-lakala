@@ -1,0 +1,68 @@
+/*
+ * R05 导入的函数原型 —— 每个参数都对照过原厂 app 的调用点（见 docs/r05-notes.md）。
+ * 桩由 gen_stubs.py 按 imports_<app>.txt 生成, loader 按 sha256 前 4 字节解析。
+ */
+#ifndef R05_API_H
+#define R05_API_H
+#include <stdint.h>
+
+/* ---- pin / gpio (同原厂 hal_init) ---- */
+extern int  ql_pin_set_func(uint32_t pin, uint32_t func);
+extern int  ql_gpio_init(uint32_t gpio, uint32_t dir, uint32_t pull, uint32_t level);
+extern int  ql_gpio_deinit(uint32_t gpio);
+extern int  ql_gpio_set_level(uint32_t gpio, uint32_t level);
+extern int  ql_gpio_set_direction(uint32_t gpio, uint32_t dir);
+#define GPIO_INPUT  0u
+#define GPIO_OUTPUT 1u
+#define PULL_NONE   0u
+
+/* ---- rtos ----
+ * 原厂: ql_rtos_task_create(&t, 0x4000, 12, "ql_init", fn, NULL, 1)
+ *       ql_rtos_task_create(&t, 0x2000, 15, "led_fg00_task", fn, 0, 50)
+ * 第 7 个参数 event_count 必须给; 内核会检查 prio / stack 上限 (见 docs/r05-notes.md §9)。 */
+extern int  ql_rtos_task_create(void *p_task, uint32_t stack, uint8_t prio,
+                                const char *name, void (*entry)(void *),
+                                void *arg, uint32_t event_count);
+extern int  ql_rtos_task_sleep_ms(uint32_t ms);
+extern void ql_delay_us(uint32_t us);
+#define APP_PRIORITY_NORMAL 12u   /* = 原厂 ql_init 线程 */
+
+/* ---- MIPI 大屏 (同原厂 App_MipiLCD.c) ---- */
+typedef struct { uint32_t width, height; } r05_mipi_lcd_cfg_t;   /* 8 字节, {800,1280} */
+extern int  ql_mipi_lcd_init(const r05_mipi_lcd_cfg_t *cfg);      /* <0 = 失败 */
+extern int  ql_mipi_lcd_write_screen(void *fb);                   /* 只设扫描基址, 不拷贝 */
+/* 名字未解出 (hash ac3ae871): 原厂 lcd_init 成功后紧接着无参调用;
+ * 内核里是对某个电源管理对象做一次 PM 锁 (推测: LCD 防休眠 wakelock)。 */
+extern int  r05_lcd_pm_lock(void);
+
+/* ---- USB 串口 (port 4 = USB modem 口, 原厂和上位机通信用的就是它) ---- */
+extern int  ql_uart_open(uint32_t port);
+extern int  ql_uart_write(uint32_t port, const void *data, uint32_t len);
+/* 原厂回调里 ql_uart_read(4, buf, size) 返回实际读到的字节数, 循环读到读完 */
+extern int  ql_uart_read(uint32_t port, void *data, uint32_t len);
+/* cb(ind, port, size): 原厂只在 ind 为 0x82060001 / 0x82060002 (RX 数据类指示) 时读 */
+typedef void (*r05_uart_cb_t)(uint32_t ind, uint32_t port, uint32_t size);
+extern int  ql_uart_register_cb(uint32_t port, r05_uart_cb_t cb);
+#define R05_PORT_USB_MODEM 4u
+#define R05_UART_IND_RX    0x82060001u
+#define R05_UART_IND_RX2   0x82060002u
+
+/* ---- 信号量 (原厂: create(&s, 0); wait(s, 超时 ms) 返回 0 = 拿到; release(s)) ---- */
+extern int  ql_rtos_semaphore_create(void **sem, uint32_t init);
+extern int  ql_rtos_semaphore_wait(void *sem, uint32_t timeout_ms);
+extern int  ql_rtos_semaphore_release(void *sem);
+
+/* ---- 看门狗 (原厂 enter: ql_dev_cfg_wdt(1); 原厂在周期任务循环里 ql_dev_feed_wdt()) ---- */
+extern int  ql_dev_cfg_wdt(uint32_t opt);
+extern int  ql_dev_feed_wdt(void);
+
+/* ---- 内核堆 (诊断用) ---- */
+extern void *malloc(uint32_t n);
+extern void  free(void *p);
+/* 输出结构按 Quectel CSDK 推测为 {total, avail, max_block, ...}; 诊断时多给几个字的空间 */
+extern int  ql_dev_memory_size_query(uint32_t *out);
+
+/* ---- 时间: 开机以来微秒 (64 位) ---- */
+extern int64_t osiUpTimeUS(void);
+
+#endif

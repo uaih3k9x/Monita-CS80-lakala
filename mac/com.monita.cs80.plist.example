@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 模板：登录后自动跑 monita-cs80。必须是 LaunchAgent（用户 GUI 会话），才能收到锁屏通知、读桌面壁纸。
+     把 __BIN__ 换成 .build/release/monita-cs80 的绝对路径，__LOG__ 换成日志文件路径，然后：
+       cp com.monita.cs80.plist.example ~/Library/LaunchAgents/com.monita.cs80.plist
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.monita.cs80.plist
+     卸载：launchctl bootout gui/$(id -u)/com.monita.cs80 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.monita.cs80</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BIN__</string>
+    <string>--lyrics</string><string>http://127.0.0.1:8788</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>__LOG__</string>
+  <key>StandardErrorPath</key><string>__LOG__</string>
+</dict>
+</plist>

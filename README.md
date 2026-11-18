@@ -1,0 +1,159 @@
+# 模拟太 · Monita-CS80
+
+> 名字借自《逆转裁判》希月心音胸前那台 **モニ太（模拟太）**——只是借个名字。
+> 这一只是一台拉卡拉 **CS80 收银客显屏**，原本对着顾客报金额，现在改行给 Mac 当歌词副屏。
+
+800×1280 竖屏放歌词、锁屏留言和一些实时数据；旁边那块段码"数码管"屏，原本显示 `0.00` 元，
+现在显示播放进度和时间——它主要是给路过的人看的，炫一下。
+
+**这是基础设施，不是交钥匙方案。** 这里提供的是：能在原厂基带上跑的固件、说清楚的 USB 协议、
+逆向笔记，加上一个参考用的上位机（我自己的歌词屏）。渲染单元——屏上画什么、怎么画——
+在 vibe coding 的时代自己写并不难，照着协议画你想要的就行。
+
+**不降级基带**：在 Quectel EC600U 的 R05 原厂基带上直接跑我们自己写的原生 app（core_stub 哈希、导出表、
+容器格式都已经逆清楚，见 [docs/r05-notes.md](docs/r05-notes.md)）。
+
+> **使用声明**
+>
+> - 本项目针对**已退役或你自己拥有**的设备，把它改成一块普通的副屏。
+> - 刷写需要**物理接触设备**：USB 连线，并在 Windows 上让模组进入下载模式。没有任何远程刷写途径。
+> - 固件只做显示（大屏、段码屏、USB 通信），**不涉及任何收款、密钥或支付功能**。
+> - 请不要用在别人正在使用的收款设备上。
+
+## 画面
+
+> 下面不是截图——是用 Mac 端**同一套渲染代码**在主机上跑出来的（`monita-cs80 --png … --sample …`），即推到设备上的实际像素。
+
+<table>
+<tr>
+<td align="center"><img src="docs/img/lyrics-playing.png" width="200"><br><sub>歌词页 · 播放中</sub></td>
+<td align="center"><img src="docs/img/lyrics-paused.png" width="200"><br><sub>歌词页 · 暂停</sub></td>
+<td align="center"><img src="docs/img/lyrics-pure.png" width="200"><br><sub>纯音乐</sub></td>
+<td align="center"><img src="docs/img/lock.png" width="200"><br><sub>锁屏 · 「主人 暂时不在」</sub></td>
+</tr>
+</table>
+
+- 歌词页：CDE/Motif 风格。封面、当前句 + 翻译、进度条；底下 Front Panel 是时钟、日历、Claude 会话数 / 等人提醒、CPU、防睡眠状态。
+- 锁屏：Mac 锁屏时换成桌面壁纸 + 小时钟 + 留言条（名字可配置；拿不到壁纸时回退成上图的 CDE 锁屏框）。
+
+段码屏展示模式（示意图，代码画的，按功能分区摆放，不是玻璃的真实排布）：
+
+<img src="docs/img/segment-plan.svg" width="560">
+
+## 硬件
+
+| | |
+|---|---|
+| 设备 | 拉卡拉 CS80 收银客显屏（二手） |
+| 模组 | Quectel **EC600U-CN**（UIS8910DM，Cortex-A5，内部 NOR 8 MiB） |
+| 基带 | 原厂 R05，**不降级** |
+| 大屏 | 800×1280 MIPI，RGB565，video 模式持续扫描；背光 GPIO 开关 |
+| 小屏 | FG00 段码 LCD，4 COM × 144 SEG，GPIO 软件模拟 I²C 风格总线 |
+| 按键 | 背面 `+` / `−` / 菜单 / 查询 |
+| 连接 | USB（模组的 USB modem 口当数据通道） |
+
+## 工作原理
+
+```
+Mac
+ ├─ tools/lyrics/lyrics.py serve ── 当前播放(mediaremote-adapter) + 网易云歌词 ──┐ HTTP
+ └─ mac/ monita-cs80 (Swift) ◀──────────────────────────────────────────────────┘
+       CoreGraphics 画 800×1280 → BGR565 → 32×16 tile 差分
+       │
+       │  --device usb：IOKit 直接开 USB 接口 7，走 docs/protocol.md 的自有协议
+       │  （不加 --device 时兼容旧链路 host 的 HTTP 接口）
+       ▼
+CS80 (R05 原厂基带 + 我们的 app @0x60270000)
+ ├─ 大屏：RECT/COPY 写进后台缓冲，PRESENT 翻页（fw v6 三缓冲，滚动 ≈ 24 fps）
+ ├─ 段码屏：Mac 每 250 ms 算一帧发 SEG（进度/时长/Mac 电量）；5 s 没收到时固件自己走时钟
+ └─ 按键 → 事件回传 Mac（计划：音量 / 播放暂停 / 切页）
+```
+
+路线和排期见 [PLAN.md](PLAN.md)。
+
+## 目录
+
+```
+fw/                     R05 原生 app
+  build.sh              一键：生成桩表 → 编译 → 链接 → 打包 2PPA → 按 loader 规则静态校验
+  app.c                 主 app：USB 收帧 → 大屏（三缓冲翻页，拿不到时退回双/单缓冲）/ 段码屏，协议见 docs/protocol.md
+  link/                 协议纯逻辑 proto.h · 跨缓冲 COPY blit.h · 三缓冲 tribuf.h · 诊断 diag.h / zc_diag.h（主机单测 test.sh）
+  sdk/                  r05_api.h 导入原型 · gen_stubs.py · pack.py · validate.py · app.ld · r05_exports.csv
+  fg00/                 段码屏驱动 fg00.h + 段位映射 segmap.h
+  lcd/                  大屏上电/帧缓冲 lcd.h · LCDC 寄存器 lcdc.h · 纯色轮换测试 lcd_test.c
+  diag/                 诊断：probe（USB 口心跳）· segtest（888888↔123456）· segprobe（逐段点亮对照）
+mac/                    Swift 包 MonitaCS80
+  Sources/MonitaCore/   纯逻辑：歌词定位/折行、像素与 tile diff、推帧决策、帧键省电
+  Sources/monita-cs80/  渲染器本体（CoreGraphics 画面、锁屏、推帧循环）
+  Tests/                swift-testing 用例
+  Samples/              预览图用的样例数据（歌词是编的）
+tools/
+  host-ref/             Python 参考上位机（pyserial）：握手、推图、差分、测吞吐、撕裂对比
+  lyrics/               lyrics.py（当前播放 + 网易云歌词 + 小 HTTP 服务）· lyrics_core.js · build-nowplaying.sh · 测试
+  segpreview/           段码屏示意图生成器
+docs/
+  r05-notes.md          R05 原生 app 笔记：哈希、导出表、loader 规则/签名门、大屏/背光/USB、段码屏协议与坑
+  protocol.md           上位机 ↔ 固件协议 v0
+  segmap.md             段码屏段位映射
+```
+
+## 构建
+
+**固件**（需要 `arm-none-eabi-gcc` 和 Python 3；只编译和静态校验，不连设备）：
+
+```sh
+bash fw/build.sh            # app + lcd/lcd_test
+bash fw/build.sh all        # 含 diag/
+```
+
+产物在 `fw/build/*.bin`，写到 NOR `0x60270000`。刷写要在 **Windows** 上让模组进下载模式（macOS 认不出下载态）。**刷机前务必先做整片备份**，刷写流程和风险见 [docs/r05-notes.md](docs/r05-notes.md)。
+
+**Mac 端**（macOS 13+，Command Line Tools 即可）：
+
+```sh
+cd mac
+swift run monita-cs80-tests                  # 测试
+swift build -c release
+.build/release/monita-cs80 --png out.png --sample Samples/lyrics-playing.json   # 出一张预览图
+.build/release/monita-cs80 --device usb --lyrics http://127.0.0.1:8788     # 直连 R05 固件（macOS：IOKit 直接开 USB 接口）
+.build/release/monita-cs80 --device usb --bench                            # 只测链路：HELLO/PING/整帧+FBCRC/带宽/SEG 时钟
+.build/release/monita-cs80 --scroll-sim --sample Samples/lyrics-playing.json   # 离线模拟一次切句滚动（COPY 规划）
+.build/release/monita-cs80 --lyrics http://127.0.0.1:8788 --name 主人          # 兼容旧链路 host
+```
+
+macOS 上模组的串口类接口是厂商类（0xFF），系统不绑驱动、**没有 `/dev/cu.*`**，所以 `--device usb` 用 IOUSBHost 直接打开接口走 bulk
+（不要 root；接口是独占的，同一时间只能有一个进程开着）。`usb` = 发 HELLO 自动探测（实测固件在接口 7），也可以写死 `usb:7`。
+Linux / 有串口驱动时照旧写串口路径：`--device /dev/ttyUSB0`。
+歌词滚动动画（`--no-scroll` 关）要 fw v2 的 COPY；连的是 v1 固件时自动不滚。
+
+**歌词数据源**（只用 Python 标准库）：
+
+```sh
+sh tools/lyrics/build-nowplaying.sh          # 一次性：编译 mediaremote-adapter（macOS 15.4+ 拿 Now Playing 需要）
+python3 tools/lyrics/lyrics.py serve         # http://127.0.0.1:8788/api/data/lyrics
+python3 -m unittest discover -s tools/lyrics/tests
+node --test tools/lyrics/tests/
+```
+
+## 欢迎贡献
+
+Windows / Linux 上位机非常欢迎有兴趣的朋友来写——我只写了 macOS 的 Swift 版，因为我懒了😂
+
+设备那一侧说的是平台无关的 USB 串口协议（[docs/protocol.md](docs/protocol.md)），能开串口、能画一张 800×1280 的图，
+就能当它的上位机。协议还是草案，有想法欢迎开 issue 一起定。
+
+## 参考与致谢
+
+- [StevenLang233/lakala-display-re](https://github.com/StevenLang233/lakala-display-re)（QDisplay）：R03 侧的硬件资料（按键、背光、段码屏候选引脚）。只引用了事实，没有使用其代码。
+- [xbsheng/lakala-cs80](https://github.com/xbsheng/lakala-cs80)：Mac 端旧链路 host，本项目暂时通过它的 HTTP 接口推帧；仓库里不包含其代码。
+- [ungive/mediaremote-adapter](https://github.com/ungive/mediaremote-adapter)（BSD-3）：macOS 15.4+ 读取 Now Playing。
+
+本项目与拉卡拉、移远（Quectel）无任何关系；仓库里不含任何厂商固件或二进制。改装自己的设备风险自负。
+
+## License
+
+Copyright (c) 2026 uaih3k9x，以 [PolyForm Noncommercial 1.0.0](LICENSE) 发布。
+
+- **非商业使用自由**：个人使用、学习、研究、实验都可以，也可以修改和再分发（需附上许可文本和 `Required Notice` 行）。
+- **商业使用需另行授权**：包括但不限于刷机后售卖设备、提供代刷服务、集成进商业产品。请在 GitHub（uaih3k9x）开 issue 联系作者。
+- 这是一份"源码可见"（source-available）许可，**不是** OSI 认可的开源协议。

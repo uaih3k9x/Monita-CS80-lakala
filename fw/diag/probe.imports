@@ -1,0 +1,5 @@
+# diag/probe: 只测 loader + 任务 + USB 串口, 不碰屏。往 USB modem 口(port 4)循环写 MONITALIVE。
+ql_uart_open
+ql_uart_write
+ql_rtos_task_create
+ql_rtos_task_sleep_ms

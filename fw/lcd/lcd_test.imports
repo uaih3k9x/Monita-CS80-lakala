@@ -1,0 +1,13 @@
+# R05 core_stub imports for lcd/lcd_test.c (888888 + MIPI 纯色轮换)。
+ql_pin_set_func
+ql_gpio_init
+ql_gpio_deinit
+ql_gpio_set_level
+ql_gpio_set_direction
+ql_delay_us
+ql_rtos_task_create
+ql_rtos_task_sleep_ms
+ql_mipi_lcd_init
+ql_mipi_lcd_write_screen
+# 原厂 lcd_init 后紧接调用的无参导出, 名字未解出 (PM 锁)
+r05_lcd_pm_lock = 0xac3ae871

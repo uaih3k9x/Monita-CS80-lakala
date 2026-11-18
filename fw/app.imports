@@ -1,0 +1,26 @@
+# R05 core_stub imports for app.c (USB 通道 + 大屏推帧 + 段码屏)。每行一个名字; "名字 = 0xHASH" 用于名字未解出的导出。
+ql_pin_set_func
+ql_gpio_init
+ql_gpio_deinit
+ql_gpio_set_level
+ql_gpio_set_direction
+ql_delay_us
+ql_rtos_task_create
+ql_rtos_task_sleep_ms
+ql_rtos_semaphore_create
+ql_rtos_semaphore_wait
+ql_rtos_semaphore_release
+ql_dev_cfg_wdt
+ql_dev_feed_wdt
+osiUpTimeUS
+ql_uart_open
+ql_uart_read
+ql_uart_write
+ql_uart_register_cb
+ql_mipi_lcd_init
+ql_mipi_lcd_write_screen
+# 原厂 lcd_init 后紧接调用的无参导出, 名字未解出 (PM 锁)
+r05_lcd_pm_lock = 0xac3ae871
+malloc
+free
+ql_dev_memory_size_query

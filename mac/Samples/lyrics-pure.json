@@ -1,0 +1,20 @@
+{
+ "state": "playing",
+ "title": "一段纯音乐（示例）",
+ "artist": "Monita",
+ "album": "样例数据",
+ "app": "com.netease.163music",
+ "source": "sample",
+ "estimated": false,
+ "songId": null,
+ "cover": null,
+ "duration": 214.0,
+ "pos": 33.0,
+ "at": 0,
+ "rate": 1.0,
+ "lyric": {
+  "status": "pure",
+  "lines": [],
+  "translated": false
+ }
+}

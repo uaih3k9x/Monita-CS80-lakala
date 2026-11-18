@@ -1,0 +1,21 @@
+# 构建产物
+fw/build/
+*.bin
+*.elf
+*.o
+mac/.build/
+mac/.swiftpm/
+__pycache__/
+*.pyc
+
+# 原厂固件 / 备份 / 刷机包：一律不进仓库
+*.pac
+*.img
+backups/
+
+# 维护者本地脱敏词表
+.public-safe.local
+
+# 系统杂物
+.DS_Store
+._*
