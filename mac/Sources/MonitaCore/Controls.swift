@@ -92,3 +92,22 @@ public func ledFor(playing: Bool, waiting: Bool) -> LedCommand {
     if waiting { return LedCommand(mask: ledBlue, mode: .blink, periodMs: 1000, onMs: 500) }
     return playing ? LedCommand(mask: ledGreen, mode: .on) : .off
 }
+
+// MARK: mediaremote-adapter 在哪
+
+/// 候选目录，按顺序探测：设了 MONITA_MRA_DIR 就只认它；否则 $MONITA_HOME/mediaremote-adapter → ~/.monita-cs80/… →
+/// ~/.cs80_panel/…（旧链路 host 的目录，以前在那儿编译过的不用再挪）。tools/lyrics/lyrics.py 用同一顺序
+public func mraCandidates(env: [String: String], home: String) -> [String] {
+    if let d = env["MONITA_MRA_DIR"], !d.isEmpty { return [d] }
+    var out: [String] = []
+    if let h = env["MONITA_HOME"], !h.isEmpty { out.append(h + "/mediaremote-adapter") }
+    for d in [home + "/.monita-cs80/mediaremote-adapter", home + "/.cs80_panel/mediaremote-adapter"] where !out.contains(d) {
+        out.append(d)
+    }
+    return out
+}
+
+/// 第一个装好了的；都没装返回第一个（日志里报它）
+public func pickMraDir(_ candidates: [String], installed: (String) -> Bool) -> String? {
+    candidates.first(where: installed) ?? candidates.first
+}

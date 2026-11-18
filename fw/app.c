@@ -12,7 +12,8 @@
  * 按键 (v8): 主循环每 ≈ 10 ms 采样 (io/keys_hw.h), 去抖/长按在 link/keys.h; HELLO 之后才发 KEY (0x90), 同一任务里写, 不和应答交错。
  * 状态灯 (v8): link/led.h 状态机, 主循环每轮算一次掩码, 变了才写 GPIO (不开任务、不忙等)。
  *   未连接: 蓝灯 2 s 亮 1 s 灭 (同原厂常态心跳); HELLO 后熄灭, 交给主机 LED (0x31);
- *   HELLO 之后 LINK_LOST_US 收不到任何字节 = 主机走了, 回到蓝灯心跳, 也不再发 KEY。
+ *   HELLO 之后 15 s 收不到任何字节 = 主机走了 (link/linkwd.h), 回到蓝灯心跳, 也不再发 KEY;
+ *   (v9) 之后又收到字节就当主机回来了: 恢复 KEY 上报, 灯恢复成主机最后设的样子 (主机睡醒后不一定重发 HELLO)。
  *
  * 入口约定 (照原厂): enter 里只配看门狗 + 建任务就返回, 不得阻塞; 任务 prio 12, 7 参数, event_count = 1。
  */
@@ -23,13 +24,13 @@
 #include "blit.h"
 #include "keys_hw.h"
 #include "led_hw.h"
+#include "linkwd.h"
 
-#define FW_VER       0x0008u          /* 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
+#define FW_VER       0x0009u          /* 9: 主机不经 HELLO 回来时恢复 KEY/灯 (link/linkwd.h), PWRKEY 慢采样不丢轻点; 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
 #define MAX_PAYLOAD  32768u          /* 800 x 20 行 RGB565 + 8 字节头 = 32008, 放得下一条整行带 */
 #define RX_CHUNK     16384u
 #define PORT         R05_PORT_USB_MODEM
 #define SEG_HOST_HOLD_US 5000000u    /* 主机发 SEG 后这么久内固件不画自己的段码 */
-#define LINK_LOST_US 15000000u       /* HELLO 之后这么久没收到字节 = 主机不在了 (主机连着时至少每 2 s 一个 PING) */
 #define KEY_SAMPLE_MS 8u             /* 按键最短采样间隔 (1.024 ms 单位); 主循环空闲时 10 ms 醒一次 */
 
 static uint8_t  g_pl[MAX_PAYLOAD] __attribute__((aligned(4)));
@@ -316,12 +317,14 @@ static void ack(uint8_t status, uint32_t extra){
 }
 
 /* ---- 按键 / 状态灯 (fw v8) ---- */
-static int      g_link;                /* 收到过 HELLO 且主机还在 (LINK_LOST_US 内有字节) */
+static lw_t     g_lw;                  /* 收到过 HELLO 且主机还在 (g_lw.up), link/linkwd.h */
+#define g_link  (g_lw.up)
 static uint32_t g_keys_ok, g_led_ok;   /* 硬件初始化成功 -> caps 位 */
 static keys_t   g_keys;
 static pwr_t    g_pwr;
 static uint32_t g_key_n, g_key_at;
 static led_t    g_led;
+static led_t    g_led_host;            /* 主机走了那一刻主机设的灯, 回来时恢复 */
 
 static void led_default(void){ led_blink(&g_led, LED_B, 3000u, 2000u, now_ms()); }   /* 未连接: 蓝灯 2 s 亮 1 s 灭 */
 
@@ -366,7 +369,7 @@ static void on_frame(void){
         g_p.frames = 1; g_p.crc_err = 0; g_p.len_err = 0;      /* 计数从这条 HELLO 重新算 */
         if (n >= 6) clk_set((uint32_t)lk_rd16(pl) | ((uint32_t)lk_rd16(pl + 2) << 16), (int16_t)lk_rd16(pl + 4));
         boot_link_ok();                                /* 开机画面还在: Link 行 WAIT -> OK */
-        g_link = 1; g_key_n = 0;                       /* KEY 计数从这条 HELLO 重新算 */
+        lw_hello(&g_lw, now_ms()); g_key_n = 0;        /* KEY 计数从这条 HELLO 重新算 */
         led_off(&g_led); led_poll();                   /* 灯交给主机 */
         uint8_t *b = g_tx;
         lk_wr16(b + 0, LK_PROTO_VER); lk_wr16(b + 2, FW_VER);
@@ -472,7 +475,7 @@ static void task_entry(void *arg){
 
     g_led_ok = led_hw_init() == 0;
     led_init(&g_led); led_default(); led_poll();
-    keys_init(&g_keys); pwr_init(&g_pwr);
+    keys_init(&g_keys); pwr_init(&g_pwr); lw_init(&g_lw);
 
     lk_init(&g_p, g_pl, MAX_PAYLOAD);
     ql_rtos_semaphore_create(&g_sem, 0);
@@ -488,6 +491,7 @@ static void task_entry(void *arg){
             if (r <= 0) break;
             uint32_t n = (uint32_t)r; const uint8_t *d = g_rx;
             st.rx_bytes += n;
+            if (lw_rx(&g_lw, now_ms()) == LW_RESUMED){ g_led = g_led_host; led_poll(); }   /* 主机回来了 (没重发 HELLO) */
             while (n){
                 int ev; uint32_t k = lk_feed(&g_p, d, n, &ev);
                 d += k; n -= k;
@@ -502,7 +506,7 @@ static void task_entry(void *arg){
         if (!lk_idle(&g_p) && t - last_rx > 500000u) lk_reset(&g_p);   /* 半截帧: 丢掉重新找同步字 */
         if (t - last_wdt > 1000000u){ ql_dev_feed_wdt(); last_wdt = t; }
         if (lcd_err == 0) clk_tick(t);
-        if (g_link && t - last_rx > LINK_LOST_US){ g_link = 0; led_default(); }   /* 主机走了: 回到未连接心跳 */
+        if (lw_tick(&g_lw, now_ms()) == LW_LOST){ g_led_host = g_led; led_default(); }   /* 主机走了: 回到未连接心跳 */
         keys_poll();
         led_poll();
     }

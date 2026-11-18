@@ -239,7 +239,31 @@ class EstimateClock:
 # ---------------- IO ----------------
 CONF_DIR = os.environ.get("MONITA_HOME") or os.path.join(os.path.expanduser("~"), ".monita-cs80")
 CACHE_DIR = os.path.join(CONF_DIR, "lyrics")
-MRA_DIR = os.environ.get("MONITA_MRA_DIR") or os.path.join(CONF_DIR, "mediaremote-adapter")
+
+
+def mra_candidates(env, home):
+    """mediaremote-adapter 候选目录，按顺序探测（同 mac/Sources/MonitaCore/Controls.swift 的 mraCandidates）：
+    设了 MONITA_MRA_DIR 就只认它；否则 $MONITA_HOME → ~/.monita-cs80 → ~/.cs80_panel（旧链路 host 的目录）。"""
+    if env.get("MONITA_MRA_DIR"):
+        return [env["MONITA_MRA_DIR"]]
+    out = [os.path.join(env["MONITA_HOME"], "mediaremote-adapter")] if env.get("MONITA_HOME") else []
+    for d in (os.path.join(home, ".monita-cs80", "mediaremote-adapter"), os.path.join(home, ".cs80_panel", "mediaremote-adapter")):
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def pick_mra_dir(candidates, installed):
+    """第一个装好了的；都没装返回第一个（日志里报它）"""
+    return next((d for d in candidates if installed(d)), candidates[0])
+
+
+def mra_installed(d):
+    return os.path.exists(os.path.join(d, "bin", "mediaremote-adapter.pl")) and \
+        os.path.isdir(os.path.join(d, "build", "MediaRemoteAdapter.framework"))
+
+
+MRA_DIR = pick_mra_dir(mra_candidates(os.environ, os.path.expanduser("~")), mra_installed)
 NETEASE_CACHE = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
                              "com.netease.163music", "Caches", "online_play_cache")
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"

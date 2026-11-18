@@ -9,6 +9,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import lyrics as L  # noqa: E402
 
 
+class MraDir(unittest.TestCase):
+    def test_probe_order(self):
+        h = "/Users/you"
+        self.assertEqual(L.mra_candidates({}, h), ["/Users/you/.monita-cs80/mediaremote-adapter",
+                                                   "/Users/you/.cs80_panel/mediaremote-adapter"])
+        self.assertEqual(L.mra_candidates({"MONITA_HOME": "/opt/m"}, h)[0], "/opt/m/mediaremote-adapter")
+        self.assertEqual(L.mra_candidates({"MONITA_MRA_DIR": "/a", "MONITA_HOME": "/b"}, h), ["/a"])
+        self.assertEqual(len(L.mra_candidates({"MONITA_HOME": "/Users/you/.monita-cs80"}, h)), 2)
+        c = L.mra_candidates({}, h)
+        self.assertEqual(L.pick_mra_dir(c, lambda d: "cs80_panel" in d), c[1])
+        self.assertEqual(L.pick_mra_dir(c, lambda d: False), c[0])
+
+
 class ParseLrc(unittest.TestCase):
     def test_basic_and_sorted(self):
         text = "[00:12.57]第二句\n[00:01.000]第一句\n"

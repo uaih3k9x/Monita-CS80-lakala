@@ -59,22 +59,23 @@ static inline int keys_feed(keys_t *k, uint32_t now, uint8_t raw, uint8_t *ev, i
 
 /* ---- PWRKEY (键 1) ----
  * 内核按下 / 抬起回调只给计数器 +1 (volatile, 回调里不做别的), 主循环用 pwr_sample 翻成电平喂给 keys_feed。
- *  - 两拍之间按下又抬起 (两个计数一起变): 电平至少保持 KEY_PWR_MIN_MS, 保证过得了去抖。
+ *  - 两拍之间按下又抬起 (两个计数一起变): 电平保持到"某一拍时已按下满 KEY_DEBOUNCE_MS"之后的下一拍,
+ *    保证 keys_feed 的去抖一定看得见 (只按时间算不够: 主循环被 PRESENT / 整屏同步拖住时两拍可差 ≈ 60 ms)。
  *  - 实机: 长按后内核不再调抬起回调。按下超过 KEY_PWR_STUCK_MS 还没抬起就当已经松开 (报一次 UP);
  *    之后迟到的抬起回调被吞掉, 下一次按下回调照常。 */
-#define KEY_PWR_MIN_MS   (KEY_DEBOUNCE_MS + 12u)
 #define KEY_PWR_STUCK_MS 4000u    /* > 内核关机长按 (3000 ms, 已被我们的回调截住) */
 
-typedef struct { uint32_t press, release, at; uint8_t down; } pwr_t;
+typedef struct { uint32_t press, release, at; uint8_t down, seen; } pwr_t;   /* seen: 已有一拍按下满去抖时间 */
 
-static inline void pwr_init(pwr_t *p){ p->press = p->release = p->at = 0; p->down = 0; }
+static inline void pwr_init(pwr_t *p){ p->press = p->release = p->at = 0; p->down = p->seen = 0; }
 
-/* press / release: 回调计数的当前值; 返回 1 = 按下 */
+/* press / release: 回调计数的当前值; 返回 1 = 按下。调用方每拍先 pwr_sample 再用同一个 now 喂 keys_feed */
 static inline uint8_t pwr_sample(pwr_t *p, uint32_t press, uint32_t release, uint32_t now){
-    if (press != p->press){ p->press = press; p->down = 1; p->at = now; }
+    if (press != p->press){ p->press = press; p->down = 1; p->at = now; p->seen = 0; }
     if (p->down){
         uint32_t held = now - p->at;
-        if ((release != p->release && held >= KEY_PWR_MIN_MS) || held >= KEY_PWR_STUCK_MS){ p->down = 0; p->release = release; }
+        if ((release != p->release && p->seen) || held >= KEY_PWR_STUCK_MS){ p->down = 0; p->release = release; }
+        else if (held >= KEY_DEBOUNCE_MS) p->seen = 1;       /* 这一拍 keys_feed 会确认按下; 之后才许抬起 */
     } else p->release = release;
     return p->down;
 }

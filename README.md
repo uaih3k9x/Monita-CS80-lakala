@@ -128,9 +128,14 @@ swift build -c release
 ```
 
 按键和状态灯（直连 + fw v8 才有，固件 HELLO_ACK 的 `caps` 说了算）：`+` / `−` 用 `osascript` 调系统音量（每下 6/100），
-查询键短按 播放 / 暂停（走 mediaremote-adapter 的 `send 2`，目录同 `lyrics.py`：`MONITA_MRA_DIR` 或 `$MONITA_HOME/mediaremote-adapter`），
+查询键短按 播放 / 暂停（走 mediaremote-adapter 的 `send 2`），
 ≡ 短按切 歌词页 ↔ 时钟页；播放中绿灯常亮，退出（SIGINT / SIGTERM）时先灭灯。`--no-keys` / `--no-led` 分别关掉；
 `--png out.png --clock --sample …` 出时钟页预览。
+
+**mediaremote-adapter 放哪**：渲染器（播放/暂停）和 `lyrics.py`（读 Now Playing）用同一套查找顺序，第一个装好了的生效：
+设了 `MONITA_MRA_DIR` 就只认它；否则依次找 `$MONITA_HOME/mediaremote-adapter` → `~/.monita-cs80/mediaremote-adapter`（`build-nowplaying.sh` 的默认产物位置）
+→ `~/.cs80_panel/mediaremote-adapter`（以前给旧链路 host 编译过的，不用挪）。launchd 起的渲染器不继承 shell 里的环境变量，
+装在别处时在 plist 的 `EnvironmentVariables` 里写 `MONITA_MRA_DIR`。
 
 macOS 上模组的串口类接口是厂商类（0xFF），系统不绑驱动、**没有 `/dev/cu.*`**，所以 `--device usb` 用 IOUSBHost 直接打开接口走 bulk
 （不要 root；接口是独占的，同一时间只能有一个进程开着）。`usb` = 发 HELLO 自动探测（实测固件在接口 7），也可以写死 `usb:7`。

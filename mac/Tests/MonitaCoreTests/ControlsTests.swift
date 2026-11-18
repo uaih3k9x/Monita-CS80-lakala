@@ -95,3 +95,20 @@ func feed(_ m: inout KeyMapper, _ evs: [(PanelKey, KeyEdge)]) -> [KeyAction] {
     #expect(down.hasPrefix("set v to (output volume of (get volume settings)) + -6"))
     #expect(!down.contains("muted"))                    // 静音时按 − 不解除静音
 }
+
+// mediaremote-adapter 目录：MONITA_MRA_DIR 指定就只认它；否则 $MONITA_HOME → ~/.monita-cs80 → ~/.cs80_panel 顺序探测
+@Test func mraDirProbeOrder() {
+    let home = "/Users/you"
+    #expect(mraCandidates(env: [:], home: home) == [
+        "/Users/you/.monita-cs80/mediaremote-adapter", "/Users/you/.cs80_panel/mediaremote-adapter",
+    ])
+    #expect(mraCandidates(env: ["MONITA_HOME": "/opt/m"], home: home).first == "/opt/m/mediaremote-adapter")
+    #expect(mraCandidates(env: ["MONITA_HOME": ""], home: home).count == 2)                   // 空串当没设
+    #expect(mraCandidates(env: ["MONITA_MRA_DIR": "/a", "MONITA_HOME": "/b"], home: home) == ["/a"])
+    #expect(mraCandidates(env: ["MONITA_HOME": "/Users/you/.monita-cs80"], home: home).count == 2)  // 去重
+    // 第一个装好了的生效；都没装返回第一个（日志里报它）
+    let c = mraCandidates(env: [:], home: home)
+    #expect(pickMraDir(c) { $0.contains("cs80_panel") } == "/Users/you/.cs80_panel/mediaremote-adapter")
+    #expect(pickMraDir(c) { _ in true } == "/Users/you/.monita-cs80/mediaremote-adapter")
+    #expect(pickMraDir(c) { _ in false } == "/Users/you/.monita-cs80/mediaremote-adapter")
+}

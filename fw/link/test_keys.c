@@ -86,13 +86,26 @@ static void t_pwr_press_release(void){
 }
 
 static void t_pwr_tap_between_samples(void){
-    /* 两拍之间按下又抬起 (计数同时变): 电平至少保持 KEY_PWR_MIN_MS, 让去抖看得见 */
+    /* 两拍之间按下又抬起 (计数同时变): 电平保持到去抖看得见为止 */
     pwr_t p; pwr_init(&p); keys_t k; keys_init(&k); uint8_t ev[8]; int n = 0;
     for (uint32_t t = 0; t < 200; t += 10){
         uint32_t c = t >= 50 ? 1u : 0u;
         n += keys_feed(&k, t, pwr_sample(&p, c, c, t) ? KEY_BIT(1) : 0, ev + n, 8 - n);
     }
     CHECK(n == 2 && ev[0] == KEY_EV(1, KEY_DOWN) && ev[1] == KEY_EV(1, KEY_UP));
+}
+
+static void t_pwr_tap_slow_sampling(void){
+    /* 主循环被 PRESENT 等帧 / 整屏同步拖住时, 两拍之间可达 ≈ 60 ms。
+     * 按下+抬起都落在同一个空档里: 去抖要求"连续两拍都是按下", 所以电平必须保持到下一拍, 否则这一下就丢了 */
+    for (uint32_t gap = 30; gap <= 70; gap += 20){
+        pwr_t p; pwr_init(&p); keys_t k; keys_init(&k); uint8_t ev[8]; int n = 0;
+        for (uint32_t t = 0; t < 400; t += gap){
+            uint32_t c = t >= gap ? 1u : 0u;                     /* 第 1 拍之前点了一下 */
+            n += keys_feed(&k, t, pwr_sample(&p, c, c, t) ? KEY_BIT(1) : 0, ev + n, 8 - n);
+        }
+        CHECK(n == 2 && ev[0] == KEY_EV(1, KEY_DOWN) && ev[1] == KEY_EV(1, KEY_UP));
+    }
 }
 
 static void t_pwr_stuck_recovers(void){
@@ -129,7 +142,7 @@ static void t_payload(void){
 
 int main(void){
     t_press_release(); t_quick_tap_passes(); t_bounce_rejected(); t_long(); t_multi_and_wrap(); t_max_respected(); t_ev_helpers();
-    t_pwr_press_release(); t_pwr_tap_between_samples(); t_pwr_stuck_recovers(); t_pwr_new_press_while_stuck(); t_payload();
+    t_pwr_press_release(); t_pwr_tap_between_samples(); t_pwr_tap_slow_sampling(); t_pwr_stuck_recovers(); t_pwr_new_press_while_stuck(); t_payload();
     printf(fails ? "keys: %d FAIL\n" : "keys: all OK\n", fails);
     return fails ? 1 : 0;
 }
