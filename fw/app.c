@@ -322,41 +322,14 @@ static void reply(uint8_t type, const uint8_t *pl, uint32_t n){
     ql_uart_write(PORT, out, len);
 }
 
-/* ACK: u8 for_type u8 status u16 0 | u32 rx_bytes frames crc_err len_err rects presents bad_param uptime_ms | u32 extra */
-static void ack(uint8_t status, uint32_t extra){
-    uint8_t *b = g_tx;
-    b[0] = g_p.type; b[1] = status; b[2] = 0; b[3] = 0;
-    uint32_t v[9] = { st.rx_bytes, g_p.frames, g_p.crc_err, g_p.len_err, st.rects, st.presents, st.bad_param,
-                      (uint32_t)(osiUpTimeUS() >> 10), extra };     /* uptime 以 1.024 ms 为单位 (免 64 位除法) */
-    for (int i = 0; i < 9; i++) lk_wr32(b + 4 + 4 * i, v[i]);
-    reply(LK_ACK, b, 40);
-}
-
 /* ---- 按键 / 状态灯 (fw v8) ---- */
 static lw_t     g_lw;                  /* 收到过 HELLO 且主机还在 (g_lw.up), link/linkwd.h */
-#define g_link  (g_lw.up)
 static uint32_t g_keys_ok, g_led_ok;   /* 硬件初始化成功 -> caps 位 */
 static keys_t   g_keys;
 static pwr_t    g_pwr;
 static uint32_t g_key_n, g_key_at;
 static led_t    g_led;
 static led_t    g_led_host;            /* 主机走了那一刻主机设的灯, 回来时恢复 */
-
-static void led_default(void){ led_blink(&g_led, LED_B, 3000u, 2000u, now_ms()); }   /* 未连接: 蓝灯 2 s 亮 1 s 灭 */
-
-static void keys_poll(void){
-    if (!g_keys_ok) return;
-    uint32_t t = now_ms();
-    if (t - g_key_at < KEY_SAMPLE_MS) return;
-    g_key_at = t;
-    uint8_t ev[KEY_N * 2];
-    int n = keys_feed(&g_keys, t, keys_hw_raw(&g_pwr, t), ev, (int)sizeof ev);
-    for (int i = 0; i < n && g_link; i++){                 /* 没连主机: 照样走状态机, 只是不发 */
-        uint8_t pl[KEY_PL_LEN], out[LK_HDR + KEY_PL_LEN + LK_TRAIL];
-        keys_payload(pl, ev[i], g_key_n++, t);
-        ql_uart_write(PORT, out, lk_encode(out, LK_KEY, 0, pl, KEY_PL_LEN));
-    }
-}
 
 static void led_poll(void){ if (g_led_ok) led_hw_apply(led_step(&g_led, now_ms())); }
 
@@ -367,11 +340,6 @@ static int      g_lcd_ok;
 static int      g_imm;                     /* 在沉浸模式里 */
 static im_t     g_im;
 static uint32_t g_roll, g_roll_raw, g_roll_rows;
-
-static uint32_t caps(void){
-    return LK_CAP_FBCRC | LK_CAP_COPY | (g_tb.n > 1 ? LK_CAP_DOUBLEBUF : 0u) | (g_tb.n > 2 ? LK_CAP_TRIBUF : 0u)
-         | (g_keys_ok ? LK_CAP_KEYS : 0u) | (g_led_ok ? LK_CAP_LED : 0u) | (g_lcd_ok ? LK_CAP_IMMERSIVE : 0u);
-}
 
 static uint32_t im_addr(int buf, uint32_t row){ return (buf == IM_BUF_ROLL ? g_roll : FB_ADDR) + row * ROW_B; }
 static void im_io_copy(void *c, int db, uint32_t dr, int sb, uint32_t sr, uint32_t n){
@@ -481,153 +449,26 @@ static void imm_make_room(void){
     if (im_can_rebase(&g_im)) im_rebase(&g_im, &g_imio);
 }
 
-/* IMM_RECT: u32 y, u16 x, w, h, u8 flags, u8 0, w*h 个 RGB565 */
-static int imm_rect(const uint8_t *pl, uint32_t n){
-    if (!g_imm || n < 12) return 0;
-    uint32_t y = lk_rd32(pl), x = lk_rd16(pl + 4), w = lk_rd16(pl + 6), h = lk_rd16(pl + 8), fl = pl[10], row;
-    if (w == 0 || h == 0 || x + w > LCD_W || n != 12u + w * h * 2u) return 0;
-    int r = im_write(&g_im, y, h, fl, &row);
-    if (r == IM_ERANGE && im_fits_after_rebase(&g_im, y, h)){ imm_make_room(); r = im_write(&g_im, y, h, fl, &row); }
-    if (r != IM_OK) return 0;
-    const uint8_t *src = pl + 12;
-    for (uint32_t i = 0; i < h; i++)
-        lk_row_move((uint16_t *)(g_roll + (row + i) * ROW_B) + x, (const uint16_t *)(src + i * w * 2u), w, 0);
-    dcache_clean(g_roll + row * ROW_B, h * ROW_B);
-    return 1;
+/* DIAG 31 (DG_TRI): -> n nbuf note s p d gver waits xcopies syncs full_syncs buf0 buf1 buf2 flip_wait_us */
+static void diag_tri(void){
+    uint32_t w[15] = { g_tb.n, g_nbuf, g_tri_note, (uint32_t)g_tb.s, (uint32_t)g_tb.p, (uint32_t)g_tb.d, g_tb.gver,
+                       g_tb.waits, g_tb.xcopies, g_tb.syncs, g_tb.full_syncs, tb_addr(0), tb_addr(1), tb_addr(2), g_flip_wait_us };
+    diag_reply(31, 0, w, 15);
 }
 
-static uint8_t imm_scroll(const uint8_t *pl, uint32_t n){
-    if (!g_imm || n != 6) return LK_EPARAM;
-    uint32_t y = lk_rd32(pl), dur = lk_rd16(pl + 4);
-    int r = im_scroll(&g_im, y, dur, now_ms());
-    if (r == IM_ERANGE && im_fits_after_rebase(&g_im, y, LCD_H)){ imm_make_room(); r = im_scroll(&g_im, y, dur, now_ms()); }
-    return r == IM_OK ? LK_OK : LK_EPARAM;
+/* DIAG 32 (DG_NBUF): u8 n (1..3, 0 = 能用几块用几块) -> 生效块数。A/B 对比三缓冲/双缓冲 */
+static void diag_nbuf(uint8_t v){
+    tri_collapse();
+    g_nactive = v > 3 ? 3u : v;
+    if (g_nactive == 1) g_back = 0;
+    else if (!g_back) g_back = g_front == FB_ADDR ? g_fb2 : FB_ADDR;
+    if (g_back) copy_rows(g_back, g_front, 0, LCD_H);
+    tri_uncollapse();
+    uint32_t w = g_tb.n;
+    diag_reply(32, 0, &w, 1);
 }
 
-static void on_frame(void){
-    const uint8_t *pl = g_pl; uint32_t n = g_p.len;
-    if (g_p.type == LK_RECT || g_p.type == LK_COPY || g_p.type == LK_DIAG) g_boot_live = 0;   /* 主机开始画了 / 诊断可能动缓冲 */
-    if (g_imm){                                        /* 沉浸模式: 普通画面的写操作和会动缓冲的诊断一律拒 */
-        if (g_p.type == LK_RECT || g_p.type == LK_COPY){ st.bad_param++; return; }
-        if (g_p.type == LK_PRESENT){ ack(LK_EPARAM, 0); return; }
-        if (g_p.type == LK_DIAG){ diag_reply(n ? pl[0] : 0, LK_EUNSUP, 0, 0); return; }
-    }
-    switch (g_p.type){
-    case LK_IMM_ENTER: {
-        uint32_t rows;
-        uint8_t stt = imm_enter(n >= 4 ? lk_rd32(pl) : 0u, &rows);
-        ack(stt, rows);
-        return;
-    }
-    case LK_IMM_EXIT:
-        imm_exit();
-        ack(LK_OK, caps());
-        return;
-    case LK_IMM_RECT:
-        if (imm_rect(pl, n)) st.rects++; else st.bad_param++;
-        return;                                        /* 同 RECT: 不应答 */
-    case LK_IMM_SCROLL:
-        ack(imm_scroll(pl, n), g_imm ? g_im.ys : 0u);
-        return;
-    case LK_RECT:
-        draw_begin();
-        if (lk_rect_apply((uint16_t *)draw_target(), LCD_W, LCD_H, pl, n, &g_tb.y0, &g_tb.y1) == LK_OK) st.rects++;
-        else st.bad_param++;
-        return;                                        /* RECT 不应答, 保持流式 */
-    case LK_COPY:
-        if (do_copy(pl, n) == LK_OK) st.rects++;
-        else st.bad_param++;
-        return;                                        /* 同 RECT: 不应答, 计入 rects / bad_param */
-    case LK_PRESENT: {
-        uint32_t t0 = now_us();
-        present();
-        st.presents++;
-        ack(LK_OK, now_us() - t0);
-        return;
-    }
-    case LK_HELLO: {
-        st.rx_bytes = 0; st.rects = 0; st.presents = 0; st.bad_param = 0;
-        g_p.frames = 1; g_p.crc_err = 0; g_p.len_err = 0;      /* 计数从这条 HELLO 重新算 */
-        if (n >= 6) clk_set((uint32_t)lk_rd16(pl) | ((uint32_t)lk_rd16(pl + 2) << 16), (int16_t)lk_rd16(pl + 4));
-        boot_link_ok();                                /* 开机画面还在: Link 行 WAIT -> OK */
-        lw_hello(&g_lw, now_ms()); g_key_n = 0;        /* KEY 计数从这条 HELLO 重新算 */
-        led_off(&g_led); led_poll();                   /* 灯交给主机 */
-        imm_exit();                                    /* 主机重连 = 它不记得沉浸模式了: 回普通画面 */
-        uint8_t *b = g_tx;
-        lk_wr16(b + 0, LK_PROTO_VER); lk_wr16(b + 2, FW_VER);
-        lk_wr16(b + 4, LCD_W); lk_wr16(b + 6, LCD_H);
-        b[8] = LK_PIXFMT_RGB565; b[9] = 72;
-        lk_wr16(b + 10, caps()); lk_wr16(b + 12, MAX_PAYLOAD); lk_wr16(b + 14, 0);
-        reply(LK_HELLO_ACK, b, 16);
-        if (!seg_host_active(now_us())) seg_draw_local();
-        return;
-    }
-    case LK_SEG:
-        if (n != 72){ ack(LK_EPARAM, 0); return; }
-        for (int i = 0; i < 72; i++) fg_fb[i] = pl[i];
-        fg_flush();
-        seg_host_at = now_us(); seg_host_seen = 1;
-        ack(LK_OK, 0);
-        return;
-    case LK_BACKLIGHT:
-        if (n != 1){ ack(LK_EPARAM, 0); return; }
-        lcd_backlight(pl[0]);
-        ack(LK_OK, 0);
-        return;
-    case LK_LED:
-        if (!g_led_ok){ ack(LK_EUNSUP, 0); return; }
-        ack(led_cmd(&g_led, pl, n, now_ms()) ? LK_EPARAM : LK_OK, 0);
-        led_poll();
-        return;
-    case LK_FBCRC: {
-        uint32_t c = 0, row;                           /* 校验的是最新提交的那块 (已显示, 或下一个帧头显示) */
-        if (g_tb.n == 1) flush_dirty();
-        uint32_t fb = tb_addr(tb_latest(&g_tb));
-        if (g_imm) fb = im_latest(&g_im, &row) ? g_roll + row * ROW_B : FB_ADDR;   /* 沉浸模式: 屏上那一段卷轴 */
-        uint32_t s = lk_fb_crc((const uint16_t *)fb, LCD_W, LCD_H, pl, n, &c);
-        ack((uint8_t)s, c);
-        return;
-    }
-    case LK_DIAG:
-        if (n >= 1 && pl[0] == 31){                    /* DG_TRI: -> n nbuf note s p d gver waits xcopies syncs full_syncs buf0 buf1 buf2 flip_wait_us */
-            uint32_t w[15] = { g_tb.n, g_nbuf, g_tri_note, (uint32_t)g_tb.s, (uint32_t)g_tb.p, (uint32_t)g_tb.d, g_tb.gver,
-                               g_tb.waits, g_tb.xcopies, g_tb.syncs, g_tb.full_syncs, tb_addr(0), tb_addr(1), tb_addr(2), g_flip_wait_us };
-            diag_reply(31, 0, w, 15);
-            return;
-        }
-        if (n == 2 && pl[0] == 32){                    /* DG_NBUF: u8 n (1..3, 0 = 能用几块用几块) -> 生效块数。A/B 对比三缓冲/双缓冲 */
-            tri_collapse();
-            g_nactive = pl[1] > 3 ? 3u : pl[1];
-            if (g_nactive == 1) g_back = 0;
-            else if (!g_back) g_back = g_front == FB_ADDR ? g_fb2 : FB_ADDR;
-            if (g_back) copy_rows(g_back, g_front, 0, LCD_H);
-            tri_uncollapse();
-            uint32_t w = g_tb.n;
-            diag_reply(32, 0, &w, 1);
-            return;
-        }
-        if (n == 2 && pl[0] == 11){                    /* DG_FLIPMODE: u8 mode -> 当前 mode */
-            g_flip_now = pl[1] ? 1u : 0u;
-            uint32_t w = g_flip_now;
-            diag_reply(11, 0, &w, 1);
-            return;
-        }
-        {   /* 旧 DIAG: 只读的几个 (堆 / 最大块 / PEEK / 帧事件计时 / 相位) 直接跑, 其余先退回双缓冲视角 */
-            uint8_t op = pl[0];
-            int ro = op == 0 || op == 1 || op == 4 || op == 7 || op == 9 || op == 21 || op == 23;
-            if (!ro) tri_collapse();
-            on_diag(pl, n);
-            if (!ro) tri_uncollapse();
-        }
-        return;
-    case LK_PING:
-        ack(LK_OK, 0);
-        return;
-    default:
-        ack(LK_EUNSUP, 0);
-        return;
-    }
-}
+#include "dispatch.h"   /* on_frame / ack / KEY 上报 / 主机在不在 (和 tools/fwsim 共用) */
 
 static void uart_cb(uint32_t ind, uint32_t port, uint32_t size){
     (void)size;
@@ -674,13 +515,7 @@ static void task_entry(void *arg){
             int r = ql_uart_read(PORT, g_rx, RX_CHUNK);
             if (r <= 0) break;
             uint32_t n = (uint32_t)r; const uint8_t *d = g_rx;
-            st.rx_bytes += n;
-            if (lw_rx(&g_lw, now_ms()) == LW_RESUMED){ g_led = g_led_host; led_poll(); }   /* 主机回来了 (没重发 HELLO) */
-            while (n){
-                int ev; uint32_t k = lk_feed(&g_p, d, n, &ev);
-                d += k; n -= k;
-                if (ev) on_frame();
-            }
+            link_rx(d, n);
             last_rx = now_us();
             keys_poll();                               /* 整帧连续推 ≈ 300 ms 时也照常采样 */
             imm_poll();                                /* 主机连续写卷轴时滚动也照走 */
@@ -691,7 +526,7 @@ static void task_entry(void *arg){
         if (!lk_idle(&g_p) && t - last_rx > 500000u) lk_reset(&g_p);   /* 半截帧: 丢掉重新找同步字 */
         if (t - last_wdt > 1000000u){ ql_dev_feed_wdt(); last_wdt = t; }
         if (lcd_err == 0) clk_tick(t);
-        if (lw_tick(&g_lw, now_ms()) == LW_LOST){ g_led_host = g_led; led_default(); }   /* 主机走了: 回到未连接心跳 */
+        link_lost_poll();                              /* 主机走了: 回到未连接心跳 */
         keys_poll();
         led_poll();
         imm_poll();

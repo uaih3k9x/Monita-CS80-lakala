@@ -29,6 +29,7 @@
 #define LK_COPY      0x22u   /* u16 sx,sy,w,h,dx,dy: 画布内搬矩形 (允许重叠), 不应答 */
 #define LK_FBCRC     0x40u   /* u16 x,y,w,h -> ACK 带 crc32 */
 #define LK_PING      0x7Fu
+#define LK_DIAG      0x50u   /* u8 op + 参数, 诊断用 (fw/link/diag.h) -> DIAG_R */
 /* 沉浸模式 (fw v9, link/imm.h): 整屏只放卷轴, 滚动 = 改扫描基址 */
 #define LK_IMM_ENTER  0x60u  /* u32 y0 (可省 = 0) -> ACK (extra = 卷轴行数 R); 已在沉浸模式 = 重新开始 */
 #define LK_IMM_EXIT   0x61u  /* 空 -> ACK (extra = 恢复后的 caps) */
@@ -37,6 +38,7 @@
 /* 设备 -> 主机 */
 #define LK_HELLO_ACK 0x81u
 #define LK_KEY       0x90u   /* u8 key, u8 ev, u16 n, u32 uptime (fw v8, link/keys.h); 主动上报, seq = 0, 主机不应答 */
+#define LK_DIAG_R    0xD0u   /* u8 op, u8 status, u16 n, n × u32 (n ≤ 16) */
 #define LK_ACK       0xFEu
 
 /* ACK status */
@@ -175,6 +177,13 @@ __attribute__((unused)) static uint32_t lk_encode(uint8_t *out, uint8_t type, ui
     uint32_t c = lk_crc32(out + 2, 4 + len);
     lk_wr32(out + LK_HDR + len, c);
     return LK_HDR + len + LK_TRAIL;
+}
+
+/* DIAG_R 载荷 (b 至少 4 + 4n 字节), 返回长度 */
+__attribute__((unused)) static uint32_t lk_diag_payload(uint8_t *b, uint8_t op, uint8_t status, const uint32_t *w, uint32_t n){
+    b[0] = op; b[1] = status; lk_wr16(b + 2, n);
+    for (uint32_t i = 0; i < n; i++) lk_wr32(b + 4 + 4 * i, w[i]);
+    return 4 + 4 * n;
 }
 
 /* ---- RECT 落到帧缓冲 ----

@@ -10,8 +10,6 @@
 
 #include "lcdc.h"
 
-#define LK_DIAG   0x50u
-#define LK_DIAG_R 0xD0u
 
 enum {
     DG_MEMQ   = 0,   /* -> rc, ql_dev_memory_size_query 输出的前 6 个字 */
@@ -21,7 +19,7 @@ enum {
     DG_PEEK   = 4,   /* u32 addr, u8 n(≤16) -> n 个字 (只允许 0x08807000..0x0880703c; 实测读 0x08807040 起会让设备复位) */
     DG_FILL   = 5,   /* u8 which, u16 c_top, u16 c_bottom -> 上半/下半两色填满并 clean, 耗时 us */
     DG_FLIP   = 6,   /* u16 count, u32 interval_us, u8 mode(0 write_screen, 1 直接写 0x08807034, 2 先等帧事件 0x04 再 write_screen) -> 总耗时 us */
-    DG_EVT    = 7,   /* u32 mask, u8 rounds(≤16) -> W1C 清 0x08807008 的 mask 位 (只允许 0x2c 内的位; 动 0x40/0x80 实测会把设备弄复位), 计时等它再置位: 每轮 us (超时 100 ms 记 0) */
+    DG_EVT    = 7,   /* u32 mask, u8 rounds(≤15) -> W1C 清 0x08807008 的 mask 位 (只允许 0x2c 内的位; 动 0x40/0x80 实测会把设备弄复位), 计时等它再置位: 每轮 us (超时 100 ms 记 0) */
     DG_DBUF   = 10,  /* u8 on -> 开/关双缓冲 (A/B 对比撕裂用); 返回 front, back */
     DG_PHASE  = 9,   /* u8 rounds(≤5) -> 每轮: 清 0x2c 三位, 等 0x04 置位为 t0, 再记 0x08 / 0x20 相对 t0 的置位时刻 (us) */
 };
@@ -29,9 +27,7 @@ enum {
 
 static void diag_reply(uint8_t op, uint8_t status, const uint32_t *w, uint32_t n){
     uint8_t b[4 + 4 * 16];
-    b[0] = op; b[1] = status; lk_wr16(b + 2, n);
-    for (uint32_t i = 0; i < n; i++) lk_wr32(b + 4 + 4 * i, w[i]);
-    reply(LK_DIAG_R, b, 4 + 4 * n);
+    reply(LK_DIAG_R, b, lk_diag_payload(b, op, status, w, n));
 }
 
 static uint32_t rd32le(const uint8_t *p){ return (uint32_t)lk_rd16(p) | ((uint32_t)lk_rd16(p + 2) << 16); }

@@ -4,8 +4,8 @@ cd "$(dirname "$0")"
 out=$(mktemp)
 cc -std=c99 -Wall -Wextra -Werror -O1 -o "$out" test_proto.c
 "$out"; rc=$?
-for t in test_zc_logic.c test_blit.c test_tribuf.c test_keys.c test_led.c test_linkwd.c test_imm.c; do
-  [ $rc -eq 0 ] && cc -std=c99 -Wall -Wextra -Werror -O1 -o "$out" "$t" && "$out"; rc=$?
+for t in test_zc_logic.c test_blit.c test_tribuf.c test_keys.c test_led.c test_linkwd.c test_imm.c test_dispatch.c; do
+  [ $rc -eq 0 ] && cc -std=c99 -Wall -Wextra -Werror -O1 -I. -o "$out" "$t" && "$out"; rc=$?
 done
 # 开机版权页: 字体表是否和 LaffStd.c 同步; C 画的 vs tools/bootscreen/render_ref.py 逐像素
 if [ $rc -eq 0 ]; then
