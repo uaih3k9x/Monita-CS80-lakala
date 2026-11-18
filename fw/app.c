@@ -6,7 +6,8 @@
  *   "monita" 任务 (prio 12) 等信号量 (最多 20 ms) -> 循环 ql_uart_read 读空 -> 拆帧 -> 写 fb / 回 ACK。
  *   RECT 直接从帧缓冲区 (一帧 payload, ≤ 32 KiB) 拷进扫描缓冲; PRESENT 时统一 clean D-cache。
  *
- * 开机画面: 深色底 + 白边框 + 中间 红/绿/蓝/白 四条色块 (顺带核对像素格式)。
+ * 开机画面 (v7): 版权页 (lcd/bootscreen.h, EDK2 UEFI 字体), 画在前台缓冲; Link 行黄色 WAIT, 第一条 HELLO 改绿色 OK,
+ *   之后主机推帧接管全屏。
  * 段码屏: 主区 "------"; HELLO 带了时间后小时钟走 hh:mm:ss。主机发过 SEG 后 5 s 内由主机接管整块显存。
  *
  * 入口约定 (照原厂): enter 里只配看门狗 + 建任务就返回, 不得阻塞; 任务 prio 12, 7 参数, event_count = 1。
@@ -17,7 +18,7 @@
 #include "proto.h"
 #include "blit.h"
 
-#define FW_VER       0x0006u          /* 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
+#define FW_VER       0x0007u          /* 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
 #define MAX_PAYLOAD  32768u          /* 800 x 20 行 RGB565 + 8 字节头 = 32008, 放得下一条整行带 */
 #define RX_CHUNK     16384u
 #define PORT         R05_PORT_USB_MODEM
@@ -85,22 +86,6 @@ static void clk_tick(uint32_t t){
         if (++clk_sod == 86400u) clk_sod = 0;
     }
     if (!seg_host_active(t)) seg_draw_local();
-}
-
-/* ---- 大屏 ---- */
-static void fb_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t c){
-    volatile uint16_t *fb = (volatile uint16_t *)FB_ADDR;
-    for (uint32_t r = y; r < y + h; r++)
-        for (uint32_t k = x; k < x + w; k++) fb[r * LCD_W + k] = c;
-}
-
-static void draw_standby(void){
-    fb_fill(0x18E5);                                   /* 深蓝灰 (24,28,40) */
-    fb_rect(0, 0, LCD_W, 4, 0xFFFF); fb_rect(0, LCD_H - 4, LCD_W, 4, 0xFFFF);
-    fb_rect(0, 0, 4, LCD_H, 0xFFFF); fb_rect(LCD_W - 4, 0, 4, LCD_H, 0xFFFF);
-    static const uint16_t bars[4] = { 0xF800, 0x07E0, 0x001F, 0xFFFF };   /* 红 绿 蓝 白 */
-    for (uint32_t i = 0; i < 4; i++) fb_rect(100 + i * 150, 540, 150, 200, bars[i]);
-    dcache_clean(FB_ADDR, FB_SIZE);
 }
 
 /* ---- 多缓冲 (fw v6: 三缓冲, 见 link/tribuf.h) ----
@@ -268,6 +253,34 @@ static void tri_uncollapse(void){
     tb_setup(n, g_front);
 }
 
+/* ---- 开机版权页 (fw v7, lcd/bootscreen.h) ----
+ * 画在正在扫描的那块 (s) 上, clean 后 tb_reset_to(s): 其余块版本作废, 第一次被选来画时从 s 整屏同步。
+ * g_boot_live: 开机画面还原样在屏上 (没收到过 RECT / COPY / DIAG)。只有这时 HELLO 才去改 Link 行。 */
+#include "bootscreen.h"
+static int g_boot_live;
+
+static void boot_draw(int seg_ok){
+    uint32_t q[8] = {0};
+    char date[11];
+    bs_date(__DATE__, date);
+    bs_info_t in = { FW_VER, date, 0xFFFFFFFFu, g_tb.n, seg_ok, 0 };
+    if (ql_dev_memory_size_query(q) == 0) in.free_kib = q[1] >> 10;     /* {total, avail, max_block}, 见 docs/r05-notes.md */
+    uint32_t fb = tb_addr(g_tb.s);
+    bs_draw((uint16_t *)fb, &in);
+    dcache_clean(fb, FB_SIZE);
+    tb_reset_to(&g_tb, g_tb.s);
+    g_boot_live = 1;
+}
+
+static void boot_link_ok(void){
+    if (!g_boot_live) return;
+    g_boot_live = 0;
+    uint32_t fb = tb_addr(g_tb.s), y0, y1;
+    bs_draw_link((uint16_t *)fb, 1, &y0, &y1);
+    dcache_clean(fb + y0 * LCD_W * 2u, (y1 - y0) * LCD_W * 2u);
+    tb_reset_to(&g_tb, g_tb.s);
+}
+
 static void reply(uint8_t type, const uint8_t *pl, uint32_t n);
 #include "diag.h"
 
@@ -295,6 +308,7 @@ static void ack(uint8_t status, uint32_t extra){
 
 static void on_frame(void){
     const uint8_t *pl = g_pl; uint32_t n = g_p.len;
+    if (g_p.type == LK_RECT || g_p.type == LK_COPY || g_p.type == LK_DIAG) g_boot_live = 0;   /* 主机开始画了 / 诊断可能动缓冲 */
     switch (g_p.type){
     case LK_RECT:
         draw_begin();
@@ -316,6 +330,7 @@ static void on_frame(void){
         st.rx_bytes = 0; st.rects = 0; st.presents = 0; st.bad_param = 0;
         g_p.frames = 1; g_p.crc_err = 0; g_p.len_err = 0;      /* 计数从这条 HELLO 重新算 */
         if (n >= 6) clk_set((uint32_t)lk_rd16(pl) | ((uint32_t)lk_rd16(pl + 2) << 16), (int16_t)lk_rd16(pl + 4));
+        boot_link_ok();                                /* 开机画面还在: Link 行 WAIT -> OK */
         uint8_t *b = g_tx;
         lk_wr16(b + 0, LK_PROTO_VER); lk_wr16(b + 2, FW_VER);
         lk_wr16(b + 4, LCD_W); lk_wr16(b + 6, LCD_H);
@@ -400,11 +415,11 @@ static void show_err(int code){
 
 static void task_entry(void *arg){
     (void)arg;
-    fg_init();                                         /* 888888 */
+    int seg_err = fg_init();                           /* 888888 */
     int lcd_err = lcd_power_on();
     if (lcd_err == 0){
-        draw_standby();
         dbuf_init();
+        boot_draw(seg_err == 0);
         ql_rtos_task_sleep_ms(200);
         lcd_backlight(1);
         seg_draw_local();

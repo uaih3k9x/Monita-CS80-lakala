@@ -50,12 +50,15 @@ static void fg_flush(void){
     for (int i = 0; i < 72; i++){ fg_start(); fg_wr(0x7E); fg_wr(0xC0); fg_wr(fg_fb[i]); fg_stop(); }
 }
 
-static void fg_hal_init(void){
-    ql_pin_set_func(56, 0); ql_gpio_deinit(FG_SDA); ql_gpio_init(FG_SDA, GPIO_OUTPUT, PULL_NONE, 1);
-    ql_pin_set_func(57, 0); ql_gpio_deinit(FG_SCK); ql_gpio_init(FG_SCK, GPIO_OUTPUT, PULL_NONE, 1);
-    ql_pin_set_func(52, 2); ql_gpio_deinit(FG_RST); ql_gpio_init(FG_RST, GPIO_OUTPUT, PULL_NONE, 0);
-    ql_pin_set_func( 4, 0); ql_gpio_deinit(FG_EN);  ql_gpio_init(FG_EN,  GPIO_OUTPUT, PULL_NONE, 1);
+/* 返回 ql_gpio_init 失败 (非 0) 的个数。0 = 成功按 Quectel CSDK 惯例推测, R05 上未单独证实 */
+static int fg_hal_init(void){
+    int bad = 0;
+    ql_pin_set_func(56, 0); ql_gpio_deinit(FG_SDA); bad += ql_gpio_init(FG_SDA, GPIO_OUTPUT, PULL_NONE, 1) != 0;
+    ql_pin_set_func(57, 0); ql_gpio_deinit(FG_SCK); bad += ql_gpio_init(FG_SCK, GPIO_OUTPUT, PULL_NONE, 1) != 0;
+    ql_pin_set_func(52, 2); ql_gpio_deinit(FG_RST); bad += ql_gpio_init(FG_RST, GPIO_OUTPUT, PULL_NONE, 0) != 0;
+    ql_pin_set_func( 4, 0); ql_gpio_deinit(FG_EN);  bad += ql_gpio_init(FG_EN,  GPIO_OUTPUT, PULL_NONE, 1) != 0;
     ql_pin_set_func(95, 5);   /* EN 真正的引脚; 原厂由 pin 表设置, 我们跳过了 pin 表所以在这里补 */
+    return bad;
 }
 
 static void fg_fill(uint8_t v){ for (int i = 0; i < 72; i++) fg_fb[i] = v; }
@@ -78,9 +81,10 @@ __attribute__((unused)) static const uint8_t fg_hex[16] = {0x3f,0x06,0x5b,0x4f,0
                                    0x7f,0x6f,0x77,0x7c,0x39,0x5e,0x79,0x71};
 
 /* = fg00_hw_init: 结束时 fb 全 0xFF 已刷出且 EN 高 => 屏已亮 888888, 无需再调 fg_on() */
-static void fg_init(void){
+/* 返回 0 = GPIO 都初始化成功 (段码屏是单向写, 没有应答可查, 这是唯一能拿到的初始化结果) */
+static int fg_init(void){
     fg_fill(0);
-    fg_hal_init();
+    int bad = fg_hal_init();
     fg_sck(1); fg_sda(1); ql_rtos_task_sleep_ms(10); fg_start(); fg_stop();
     ql_gpio_set_level(FG_RST, 0); ql_rtos_task_sleep_ms(50); ql_rtos_task_sleep_ms(100);
     ql_gpio_set_level(FG_RST, 1); ql_rtos_task_sleep_ms(100);
@@ -97,6 +101,7 @@ static void fg_init(void){
     fg_fill(0xFF);
     fg_flush();
     ql_rtos_task_sleep_ms(50);
+    return bad;
 }
 
 /* EN 开关。不发 3C/3D 命令(语义未证实), 只控 GPIO10: 高=亮 低=灭 (实机验证)。 */

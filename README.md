@@ -64,7 +64,7 @@ Mac
        │  （不加 --device 时兼容旧链路 host 的 HTTP 接口）
        ▼
 CS80 (R05 原厂基带 + 我们的 app @0x60270000)
- ├─ 大屏：RECT/COPY 写进后台缓冲，PRESENT 翻页（fw v6 三缓冲，滚动 ≈ 24 fps）
+ ├─ 大屏：开机版权页（fw v7）；RECT/COPY 写进后台缓冲，PRESENT 翻页（三缓冲，滚动 ≈ 24 fps）
  ├─ 段码屏：Mac 每 250 ms 算一帧发 SEG（进度/时长/Mac 电量）；5 s 没收到时固件自己走时钟
  └─ 按键 → 事件回传 Mac（计划：音量 / 播放暂停 / 切页）
 ```
@@ -150,6 +150,8 @@ Windows / Linux 上位机非常欢迎有兴趣的朋友来写——我只写了 
 
 本项目与拉卡拉、移远（Quectel）无任何关系；仓库里不含任何厂商固件或二进制。改装自己的设备风险自负。
 
+- 开机版权页用的是 [EDK2](https://github.com/tianocore/edk2) 的 UEFI 8×19 字体（`tools/edk2font/LaffStd.c`），授权见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
 ## License
 
 Copyright (c) 2026 uaih3k9x，以 [PolyForm Noncommercial 1.0.0](LICENSE) 发布。
@@ -157,3 +159,4 @@ Copyright (c) 2026 uaih3k9x，以 [PolyForm Noncommercial 1.0.0](LICENSE) 发布
 - **非商业使用自由**：个人使用、学习、研究、实验都可以，也可以修改和再分发（需附上许可文本和 `Required Notice` 行）。
 - **商业使用需另行授权**：包括但不限于刷机后售卖设备、提供代刷服务、集成进商业产品。请在 GitHub（uaih3k9x）开 issue 联系作者。
 - 这是一份"源码可见"（source-available）许可，**不是** OSI 认可的开源协议。
+- 例外：开机字体来自 EDK2，BSD-2-Clause-Patent（`tools/edk2font/LaffStd.c` 与生成的 `fw/lcd/font_uefi.h`），见 [THIRD_PARTY.md](THIRD_PARTY.md)。

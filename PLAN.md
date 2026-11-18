@@ -11,7 +11,10 @@
 
 - `fw/`：R05 原生 app 工具链跑通（core_stub 哈希、导出表、2PPA 打包、按 loader 规则静态校验）。
   - **主 app = USB 通道 + 大屏推帧（第 1、2 步固件侧完成，实机跑通）**：port 4 收帧（`link/proto.h`，主机单测 `sh fw/link/test.sh`），
-    RECT/PRESENT/SEG/BACKLIGHT/FBCRC/PING；开机待机画面 + 段码屏 `------` + HELLO 校时后的小时钟；看门狗照原厂。
+    RECT/PRESENT/SEG/BACKLIGHT/FBCRC/PING；开机版权页（fw v7）+ 段码屏 `------` + HELLO 校时后的小时钟；看门狗照原厂。
+  - **开机版权页（fw v7，待上机）**：`fw/lcd/bootscreen.h` 画在前台缓冲，EDK2 UEFI 8×19 字体 2 倍放大（`tools/gen_font.py` 生成 `font_uefi.h`）；
+    动态行：版本、构建日期、堆剩余、缓冲块数（三缓冲 x3 OK / 降级 WARN）、段码屏 GPIO 初始化；Link 行 WAIT，第一条 HELLO 改 OK。
+    主机单测和设计稿参考渲染（`tools/bootscreen/render_ref.py`）逐像素一致。
   - **三缓冲（fw v6，当前在机）**：R05 内核堆实测还有 4.3 MB 连续空间，开机 malloc 第二、三块 fb；扫描基址帧头锁存，PRESENT 立即翻页、下一批直接画第三块。
     拿不到第三块退回双缓冲（帧事件 `0x08807008`，周期 26.6 ms），再不行单缓冲。
   - 实测：裸链路 ≈ 8 MB/s；整帧 ≈ 320 ms（单缓冲）/ 390 ms（双缓冲）；小块差分 ≈ 5 ms（单）/ 52 ms（双，主要在等帧）；0 丢包，回读 CRC 一致。
