@@ -33,11 +33,16 @@ u32 crc          CRC-32/IEEE，覆盖 type, seq, len, payload（不含 A5 5A 和
 
 CRC-32/IEEE 就是 zlib / PNG / Ethernet 用的那个（Python `zlib.crc32`，`"123456789"` → `0xCBF43926`）。
 
-坏帧（CRC 错、长度超限）：设备丢弃、计数（见 ACK 统计），从下一个字节重新找 `A5 5A`，**不应答**。
-半截帧超过 0.5 s 没有后续字节也丢掉。
+坏帧（CRC 错、长度超限）：设备丢弃、计数（见 ACK 统计），**不应答**。设备是流式拆帧、不留缓冲，所以重新找 `A5 5A` 的位置是：
+- 长度超限（`len > max_payload`）：读完 4 字节头（type、seq、len）就重新找，后面的字节照常扫同步字；
+- CRC 错：按 `len` 把整帧（payload + 4 字节 CRC）读完才重新找。所以 `len` 字段坏了会把后面最多 `len + 4` 字节一起吞掉，
+  夹在里面的好帧不计数、不应答。主机表现为等应答超时（一般是等 PRESENT 的 ACK），重发整帧即可。
 
-**应答规则只有一条：除了 RECT，每一条合法的主机帧都恰好有一条应答**（HELLO → HELLO_ACK，DIAG → DIAG_R，其余 → ACK）。
-RECT 不应答，所以可以连续成批地写，不用等。
+半截帧超过 0.5 s 没有后续字节也丢掉。主机侧拆设备回包时可以更宽松（参考实现都是坏帧前进 1 字节重新找同步）。
+
+**应答规则：除了 RECT / COPY / IMM_RECT，每一条合法的主机帧都恰好有一条应答**（HELLO → HELLO_ACK，DIAG → DIAG_R，其余 → ACK）。
+RECT / COPY / IMM_RECT 不应答（被拒也不应答，只计 `bad_param`），所以可以连续成批地写，不用等；之后任何一条有应答的消息
+（PRESENT、IMM_SCROLL、PING）的 ACK 都是同步点。沉浸模式里被拒的 RECT / COPY 同样不应答。
 
 设备主动发的只有 KEY（0x90，`seq` = 0），可能夹在任何两条应答之间。主机拆帧时按 type 分开：等应答时把 KEY 交给按键处理，不要丢；
 不认识 KEY 的旧上位机按 type + seq 过滤应答，会自然忽略它。
@@ -86,6 +91,10 @@ u16 max_payload   32768
 u16 0
 ```
 
+- `proto_ver` 不是 0 的设备，本文档描述的上位机不要接着用（参考实现：Python 警告，Mac 断开）。
+- `caps` 是 HELLO 那一刻的快照（HELLO 会先退出沉浸模式），运行中会变：沉浸模式里没有多缓冲（bit1 / bit3 暂时不成立）；
+  IMM_EXIT 重新拿第二、三块时可能拿不全，最新的 caps 在 IMM_EXIT 的 ACK `extra` 里；DIAG 32 也会改生效块数。bit0 / bit2 一直置位。
+
 ### ACK（0xFE，40 B）
 
 ```
@@ -96,11 +105,12 @@ u32 rx_bytes      HELLO 以来收到的字节
 u32 frames        合法帧数
 u32 crc_err       CRC 错的帧
 u32 len_err       长度超限的帧
-u32 rects         成功写入的 RECT
+u32 rects         成功写入的 RECT / COPY / IMM_RECT
 u32 presents
-u32 bad_param     被拒的 RECT (越界 / 长度不对)
+u32 bad_param     被拒的 RECT / COPY / IMM_RECT (越界 / 长度不对 / 沉浸模式里的 RECT、COPY / 不带 bit0 写屏上的行)
 u32 uptime        设备开机时间，单位 1.024 ms
-u32 extra         依消息而定 (PRESENT: 耗时 µs；FBCRC: CRC)
+u32 extra         依消息而定：PRESENT 提交耗时 µs；FBCRC 这块像素的 CRC；IMM_ENTER 卷轴行数 R；
+                  IMM_EXIT 退出后的 caps；IMM_SCROLL 正在扫描的窗口顶（还没生效的跳转 / 动画开始前的值）；其余 0
 ```
 
 主机可以拿 PRESENT 的 ACK 检查这一批有没有出错：`crc_err + len_err + bad_param` 比上一次多了，
@@ -159,7 +169,7 @@ u8  pixels[w*h*2]    RGB565 小端，行优先；payload 长度必须正好 8 + 
 
 ### KEY（0x90，设备 → 主机，fw v8）
 
-前面板 4 个键，设备去抖后上报。**只在收到过 HELLO 之后发**；HELLO 把计数 `n` 清零；HELLO 之后 15 s 收不到主机任何字节（主机连着时至少每 2 s 一个 PING），
+前面板 4 个键，设备去抖后上报。**只在收到过 HELLO 之后发**；HELLO 把计数 `n` 清零；HELLO 之后 15 s（固件计时 15000 个 1.024 ms 单位，实际约 15.4 s）收不到主机任何字节（主机连着时至少每 2 s 一个 PING），
 设备当主机已经走了，停止上报。fw v8 要等下一条 HELLO 才恢复；**fw v9 起只要又收到字节就恢复**（主机睡醒、进程被挂起后接着发时不一定重发 HELLO），
 计数 `n` 接着走（不清零）。帧头 `seq` = 0，不对应任何主机帧，主机**不应答**。
 
@@ -186,7 +196,7 @@ u8  mask          bit0 红  bit1 绿  bit2 蓝（可混 7 色），其余位必�
 u8  mode          0 灭  1 常亮  2 闪烁
 u16 period_ms     闪烁周期，0 = 1000，最小 40
 u16 on_ms         闪烁中亮的时长，0 = 周期的一半；必须 < period_ms
-u16 duration_ms   0 = 一直保持；否则到时自动灭
+u16 duration_ms   0 = 一直保持；否则到时自动灭（mode 0 时忽略）
 ```
 
 - payload 必须正好 8 字节、参数合法，否则 ACK `status` = 1，灯不变；固件没有灯（`caps` 没有 bit5）时回 3。
@@ -206,6 +216,7 @@ u16 duration_ms   0 = 一直保持；否则到时自动灭
 再按堆里实际能拿到的最大块分配卷轴（最多 4096 行；拿完堆里还要剩 128 KB）。典型 R ≈ 2700 行（4.3 MB）；
 不到 `1280 + 256` 行就不开（ACK `status` = 3，多缓冲原样恢复，主机留在普通页面）。原厂 fb 在沉浸模式里当"保留缓冲"。
 IMM_EXIT（或任何一条 HELLO）把当前画面抄回原厂 fb 显示、还掉卷轴、重新拿第二、三块；拿不到就少几块，ACK 的 extra 是新的 caps。
+不在沉浸模式时发 IMM_EXIT 什么都不做，照样回 `status` = 0，extra = 当前 caps。
 
 **坐标**：主机用逻辑行号 `y`（u32）写卷轴、指定窗口。IMM_ENTER 的 `y0` 是起点（卷轴第 0 行 = 逻辑行 y0）。
 屏幕显示逻辑行 `[Y, Y+1280)`，`Y` 是窗口顶。
@@ -214,7 +225,7 @@ IMM_EXIT（或任何一条 HELLO）把当前画面抄回原厂 fb 显示、还�
 |---|---|
 | IMM_ENTER `y0` | 进入（或已在沉浸模式里 = **重新开始**：屏上留着最后一帧，卷轴作废、从 y0 重来。换歌、往回跳都用它）。进入后屏上先还是原来的画面，直到第一条 IMM_SCROLL |
 | IMM_RECT | 把 `w×h` 像素写到逻辑行 `[y, y+h)` 的 `[x, x+w)`。只能写**不在屏上**的行；`flags` bit0 = 允许写屏上的行（主机自己负责，只用来改颜色之类，最多撕裂一帧）。不应答，成功计 `rects`，被拒计 `bad_param` |
-| IMM_SCROLL `y, dur_ms` | 窗口滚到顶 = y。`dur_ms` = 0 下一帧直接跳；否则固件做 ease-out cubic 缓动，每帧（≤ 37.5 fps）写一次基址。第一次 SCROLL 一律直接跳（上屏）。一次滚动 ≤ 32767 行 |
+| IMM_SCROLL `y, dur_ms` | 窗口滚到顶 = y。`dur_ms` = 0 下一帧直接跳；否则固件做 ease-out cubic 缓动，每帧（≤ 37.5 fps）写一次基址。第一次 SCROLL 一律直接跳（上屏）。带缓动（`dur_ms` > 0）时一次最多滚 32767 行，超过回 `status` = 1；`dur_ms` = 0 的直接跳没有这个限制（目标窗口在卷轴里就行） |
 
 - **写在前、滚在后**：滚动要露出来的行必须在 IMM_SCROLL 之前写好。IMM_SCROLL 的 ACK 也是同步点（之前的 IMM_RECT 都处理完了）。
   动画进行中，窗口扫过的行都算"在屏上"；缓动的中间位置主机不知道，所以动画期间别写会被扫到的行。
@@ -235,12 +246,14 @@ IMM_SCROLL 缓动 360 ms，停下后再补其余变了档的颜色。换歌 / �
 
 回包 DIAG_R：`u8 op, u8 status, u16 n, n × u32`，**n ≤ 16**（载荷 ≤ 68 B）。
 
-fw v3 之前回包缓冲只有 48 B：13 个字以上的回包（PEEK 16 字、EVT 15 轮、PHASE 5 轮）会写穿栈、让设备复位。
-早先记的"读 `0x08807040` 起复位"和"W1C 0x40/0x80 复位"很可能都是这个缺陷，而不是寄存器本身的问题。fw v4 已修。
+fw v3 及之前回包缓冲只有 48 B：13 个字以上的回包（PEEK 16 字、EVT 15 轮、PHASE 5 轮）会写穿栈、让设备复位。
+早先记的"读 `0x08807040` 起复位"和"W1C 0x40/0x80 复位"很可能都是这个缺陷，而不是寄存器本身的问题。fw v4 已修（见 [r05-notes.md](r05-notes.md)）。
+
+空 payload 的 DIAG 回 `op` = 0、`status` = 1。不认识的 op 回 `status` = 3。
 
 | op | 参数 → 回包 | 版本 |
 |---|---|---|
-| 0–10 | 堆 / 最大块 / 第二块 fb / 切扫描基址 / 读 LCDC / 填色 / 翻页压测 / 帧事件计时 / 相位 / 双缓冲开关（见 `fw/link/diag.h`） | v0+ |
+| 0–7, 9, 10 | 堆 / 最大块 / 第二块 fb / 切扫描基址 / 读 LCDC / 填色 / 翻页压测 / 帧事件计时 / 相位 / 双缓冲开关（见 `fw/link/diag.h`；没有 op 8） | v0+ |
 | 11 | `u8 mode` 翻页时机 → mode（v4 起默认 1 = 立即） | v2+ |
 | 20–25 | 零拷贝滚动实验：ARM / PEEK / POKE（白名单）/ LINE / RULER / SPLIT（`fw/link/zc_diag.h`） | v3+ |
 | 26–30 | 已移除（DMA 研究结论：不比 CPU 快，见 [r05-notes.md](r05-notes.md)） | v4–v5 研究期 |
@@ -269,10 +282,21 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 
 ## 参考实现
 
-- Python：`tools/host-ref/monita_link.py`（协议）+ `cs80.py`（命令行：hello / ping / pattern / png / bench / diffdemo / seg / teartest / scrollbench / tri / e0 / e1 / zc）。
-  只要 pyserial；推 PNG 要 Pillow。`python3 -m unittest discover -s tools/host-ref`。
+- Python：`tools/host-ref/monita_link.py`（协议，覆盖到 fw v9：KEY、LED、沉浸模式 IMM_*）+ `cs80.py`（命令行：hello / ping / pattern / png / bench / diffdemo / seg / teartest / scrollbench / tri / e0 / e1 / zc）。
+  串口优先用 pyserial，没装时 POSIX 上用 termios；推 PNG 要 Pillow。`python3 -m unittest discover -s tools/host-ref`。
 - Swift：`mac/Sources/MonitaCore/Link.swift`（纯逻辑，有测试）+ `mac/Sources/monita-cs80/UsbLink.swift`（macOS IOKit，接口 7）/ `SerialLink.swift`（termios 串口，Linux 等），
   渲染器 `monita-cs80 --device usb`（或 `--device /dev/ttyUSB0`）。
+
+## 不用设备测上位机：固件模拟器
+
+`tools/fwsim/`：把固件的协议层（`fw/link/dispatch.h` 和它用到的 proto / blit / tribuf / imm / keys / led / linkwd）原样编成主机程序，
+硬件换成假的（3 块帧缓冲、卷轴、按键注入；帧事件立即发生），开一个伪终端当 USB 串口。
+
+- `sh tools/fwsim/run.sh`：Python 参考实现和 Mac 渲染器（debug 构建）各跑一遍同一套脚本（HELLO、整帧 / COPY / FBCRC、SEG、LED、
+  按键、未知 type、DIAG、坏帧、沉浸模式 ...），四种模拟器配置（三 / 单 / 双缓冲 + 16 KiB max_payload / 卷轴不够），
+  结果和本文档逐项对比，两个上位机之间也要一致。
+- 测自己的上位机：`tools/fwsim/build/fwsim` 第一行打印 `PTY /dev/ttysNNN`，把它当串口打开即可；stdin 发 `tap 3`（按一下 + 键）、
+  `stat`（屏上 CRC、缓冲块数、灯等，一行 JSON）。用的是 POSIX 伪终端（macOS / Linux；Windows 上可以在 WSL 里跑）。
 
 ## 以后
 

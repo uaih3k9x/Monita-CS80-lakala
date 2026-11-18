@@ -87,7 +87,7 @@ fw/                     R05 原生 app
   build.sh              一键：生成桩表 → 编译 → 链接 → 打包 2PPA → 按 loader 规则静态校验
   app.c                 主 app：USB 收帧 → 大屏（三缓冲翻页，拿不到时退回双/单缓冲）/ 段码屏，协议见 docs/protocol.md
   link/                 协议纯逻辑 proto.h · 跨缓冲 COPY blit.h · 三缓冲 tribuf.h · 沉浸模式卷轴 imm.h · 按键 keys.h · 状态灯 led.h
-                        · 主机在不在 linkwd.h · 诊断 diag.h / zc_diag.h（主机单测 test.sh）
+                        · 主机在不在 linkwd.h · 协议分发 dispatch.h · 诊断 diag.h / zc_diag.h（主机单测 test.sh）
   io/                   按键 keys_hw.h（3 个 GPIO + PWRKEY 回调）· 状态灯 led_hw.h（3 个 GPIO）
   sdk/                  r05_api.h 导入原型 · gen_stubs.py · pack.py · validate.py · app.ld · r05_exports.csv
   fg00/                 段码屏驱动 fg00.h + 段位映射 segmap.h
@@ -99,7 +99,8 @@ mac/                    Swift 包 MonitaCS80
   Tests/                swift-testing 用例
   Samples/              预览图用的样例数据（歌词是编的）
 tools/
-  host-ref/             Python 参考上位机（pyserial）：握手、推图、差分、测吞吐、撕裂对比
+  host-ref/             Python 参考上位机（pyserial 或 termios）：握手、推图、差分、KEY / LED / 沉浸模式、测吞吐、撕裂对比
+  fwsim/                固件模拟器（协议层是固件原样代码，伪终端当串口）+ 上位机对照测试 run.sh
   lyrics/               lyrics.py（当前播放 + 网易云歌词 + 小 HTTP 服务）· lyrics_core.js · build-nowplaying.sh · 测试
   segpreview/           段码屏示意图生成器
 docs/
@@ -165,6 +166,11 @@ Windows / Linux 上位机非常欢迎有兴趣的朋友来写——我只写了 
 
 设备那一侧说的是平台无关的 USB 串口协议（[docs/protocol.md](docs/protocol.md)），能开串口、能画一张 800×1280 的图，
 就能当它的上位机。协议还是草案，有想法欢迎开 issue 一起定。
+
+**没有设备也能测**：`tools/fwsim/` 是固件的主机模拟器，协议层就是固件自己的代码，开一个伪终端当 USB 串口。
+`sh tools/fwsim/run.sh` 让 Python 参考实现（`tools/host-ref/`）和 Mac 版各跑一遍对照脚本，结果要和协议文档一致；
+测你自己的上位机：运行 `tools/fwsim/build/fwsim`，把它打印的 `/dev/ttys…` 当串口打开就行，按键可以从它的 stdin 注入（`tap 3`）。
+提交改动前请跑一遍 `sh fw/link/test.sh`、`python3 -m unittest discover -s tools/host-ref` 和 `sh tools/fwsim/run.sh`。
 
 ## 参考与致谢
 

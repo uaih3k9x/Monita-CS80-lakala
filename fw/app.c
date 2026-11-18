@@ -311,7 +311,7 @@ static void reply(uint8_t type, const uint8_t *pl, uint32_t n);
 #include "diag.h"
 
 /* ---- 回包 ---- */
-/* 回包缓冲按最大的 DIAG_R 算: 4 + 16 个字 = 68 B。v3 之前只有 48 B, 13 个字以上的 DIAG 回包 (PEEK 16 字、
+/* 回包缓冲按最大的 DIAG_R 算: 4 + 16 个字 = 68 B。v3 及之前只有 48 B (v4 修), 13 个字以上的 DIAG 回包 (PEEK 16 字、
  * EVT 15 轮、PHASE 5 轮、ZC_LINE 15 点) 会写穿栈上的返回地址 -> 设备复位。这就是早先"读 0x08807040 起复位"
  * "W1C 0x40/0x80 复位"和 E0 复位的共同原因 (推断: 三次都是 ≥13 字的回包)。 */
 #define REPLY_MAX 68u

@@ -115,7 +115,8 @@ __attribute__((unused)) static void lk_reset(lk_parser_t *p){ p->state = LK_S_SY
 __attribute__((unused)) static int lk_idle(const lk_parser_t *p){ return p->state == LK_S_SYNC0; }
 
 /* 吃进最多 n 字节, 返回实际消耗的字节数; 一旦收齐一帧就停下并 *ev = LK_EV_FRAME。
- * 坏帧 (长度超限 / CRC 错) 计数后丢弃, 从下一个字节重新找 A5 5A, 不应答。 */
+ * 坏帧计数后丢弃、不应答, 然后重新找 A5 5A: 长度超限的读完 4 字节头就找 (后面的字节照常扫);
+ * CRC 错的是按 len 整帧读完才找 (流式、不留缓冲; len 坏了会吞掉后面最多 len+4 字节里的好帧)。 */
 static uint32_t lk_feed(lk_parser_t *p, const uint8_t *d, uint32_t n, int *ev){
     uint32_t i = 0;
     *ev = LK_EV_NONE;

@@ -19,3 +19,6 @@ backups/
 # 系统杂物
 .DS_Store
 ._*
+
+# 模拟器构建产物
+tools/fwsim/build/
