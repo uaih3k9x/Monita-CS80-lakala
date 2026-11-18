@@ -89,7 +89,7 @@ final class LyricsPage {
     }
 
     // MARK: 窗口框（dtwm）
-    private func windowFrame(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ title: String, _ paused: Bool) -> CGRect {
+    func windowFrame(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ title: String, _ paused: Bool) -> CGRect {
         let B = 8.0, TH = 44.0
         box(x, y, w, h, C.title, false, 2)
         let s = shades(C.title), corner = 34.0
@@ -159,7 +159,7 @@ final class LyricsPage {
     }
 
     // MARK: Front Panel
-    private func frontPanel(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ inp: PageInput) {
+    func frontPanel(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ inp: PageInput) {
         box(x, y, w, h, C.panel, false, 2)
         let pad = 10.0
         func slot(_ sx: Double, _ sw: Double) -> CGRect {

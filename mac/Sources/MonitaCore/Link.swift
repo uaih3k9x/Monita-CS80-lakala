@@ -5,7 +5,10 @@
 public enum LinkType {
     public static let hello: UInt8 = 0x01, seg: UInt8 = 0x10, rect: UInt8 = 0x20, present: UInt8 = 0x21, copy: UInt8 = 0x22
     public static let backlight: UInt8 = 0x30, fbcrc: UInt8 = 0x40, diag: UInt8 = 0x50, ping: UInt8 = 0x7F
+    public static let led: UInt8 = 0x31
     public static let helloAck: UInt8 = 0x81, ack: UInt8 = 0xFE
+    /// 设备主动上报的按键事件（fw v8），seq = 0，主机不应答
+    public static let key: UInt8 = 0x90
 }
 
 private let crcTable: [UInt32] = (0..<256).map { i -> UInt32 in
@@ -88,6 +91,8 @@ public struct HelloInfo: Equatable {
     public var proto, fw, width, height, pixfmt, segBytes, caps, maxPayload: Int
     public var doubleBuffered: Bool { caps & 2 != 0 }
     public var hasCopy: Bool { caps & 4 != 0 }
+    public var hasKeys: Bool { caps & 0x10 != 0 }
+    public var hasLed: Bool { caps & 0x20 != 0 }
     public init?(_ p: [UInt8]) {
         guard p.count >= 16 else { return nil }
         proto = rd16(p, 0); fw = rd16(p, 2); width = rd16(p, 4); height = rd16(p, 6)

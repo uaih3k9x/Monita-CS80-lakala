@@ -12,6 +12,12 @@
 - `fw/`：R05 原生 app 工具链跑通（core_stub 哈希、导出表、2PPA 打包、按 loader 规则静态校验）。
   - **主 app = USB 通道 + 大屏推帧（第 1、2 步固件侧完成，实机跑通）**：port 4 收帧（`link/proto.h`，主机单测 `sh fw/link/test.sh`），
     RECT/PRESENT/SEG/BACKLIGHT/FBCRC/PING；开机版权页（fw v7）+ 段码屏 `------` + HELLO 校时后的小时钟；看门狗照原厂。
+  - **按键 + 状态灯（fw v8，待上机）**：硬件事实 2026-11-18 用诊断 app 实机确认（[r05-notes.md §7](docs/r05-notes.md)）。
+    按键：主循环 ≈ 10 ms 采样，16 ms 软件去抖、1 s 长按（`fw/link/keys.h`，主机单测），HELLO 之后发 KEY（0x90）；
+    PWRKEY 回调只数次数，长按后收不到抬起时 4 s 超时自恢复。状态灯：`fw/link/led.h` 亮 / 灭 / 闪烁状态机，主循环每轮算掩码、变了才写 GPIO；
+    未连接蓝灯 2 s 亮 1 s 灭，HELLO 后交给主机 LED（0x31），HELLO 之后 15 s 没字节回到心跳。`caps` bit4 KEYS / bit5 LED。
+    Mac 侧（`mac/Sources/monita-cs80/Controls.swift`，纯逻辑 `MonitaCore/Controls.swift`）：+/− 系统音量、查询 播放/暂停、≡ 切 歌词页 ↔ 时钟页；
+    播放中绿灯常亮，退出时灭灯；`--no-keys` / `--no-led`。会话"等人"蓝灯闪的逻辑已写好，但直连模式下还没有会话数据源（见"顺带要做的"）。
   - **开机版权页（fw v7，待上机）**：`fw/lcd/bootscreen.h` 画在前台缓冲，EDK2 UEFI 8×19 字体 2 倍放大（`tools/gen_font.py` 生成 `font_uefi.h`）；
     动态行：版本、构建日期、堆剩余、缓冲块数（三缓冲 x3 OK / 降级 WARN）、段码屏 GPIO 初始化；Link 行 WAIT，第一条 HELLO 改 OK。
     主机单测和设计稿参考渲染（`tools/bootscreen/render_ref.py`）逐像素一致。
@@ -66,12 +72,14 @@ Agent 会话数（直连模式下暂时没有，见下"顺带要做的"）。
 
 ![段码屏展示模式示意](docs/img/segment-plan.svg)
 
-### 按键
+### 按键与状态灯（fw v8）
 
-- `+` / `−`：Mac 音量。
-- 左边两键：播放/暂停、切页（歌词页 ↔ 以后的其它页）。
-- 引脚：模组脚 99 / 13 / 14，低有效、上拉输入（来自 QDisplay 的 R03 资料，见 r05-notes.md §7）；R05 上的 `ql` GPIO 号待从原厂 app 里核对。
-- 固件消抖后发 KEY 事件给 Mac，由 Mac 执行（媒体键 / 音量）。
+- `+` / `−`：Mac 音量（按下即生效）。
+- 查询（左上，PWRKEY）短按：播放 / 暂停；长按：还没定（TODO）。
+- ≡（左下）短按：歌词页 ↔ 时钟页（时钟页 = 大号 HH:mm + 日期 + Front Panel）。
+- 状态灯：播放中绿灯常亮，暂停 / 没在放熄灭；有 Claude 会话在等人时蓝灯闪（等本地会话扫描做好后接上）；没连上 Mac 时固件自己蓝灯心跳。
+- 不做调光 / 呼吸（只有 GPIO，软件 PWM 实测效果差）。
+- 引脚和坑见 [r05-notes.md §7](docs/r05-notes.md)。
 
 ---
 
@@ -82,7 +90,7 @@ Agent 会话数（直连模式下暂时没有，见下"顺带要做的"）。
    Mac 上测通后删掉 `mac/` 对旧 host 的依赖（`/api/patch`、`/api/frame`、`/api/status`、`/api/heartbeat`、`/api/screensaver`、`/api/layout`）。
 3. **防撕裂**：帧事件位已找到（`0x08807008` 的 0x04，26.6 ms），基址确认帧头锁存，三缓冲已上机 ✅。剩下：肉眼确认翻页干净；
    单缓冲退路的"追光"写入（只在拿不到第二块时需要）。
-4. **按键**：核对 R05 的 ql GPIO 号 → 消抖 → KEY 事件 → Mac 侧媒体控制。
+4. **按键 + 状态灯**：GPIO 号实机核对 ✅ → 去抖 / KEY / LED（fw v8）✅ → Mac 侧音量 / 播放暂停 / 切页 / 灯 ✅ → 上机验证。
 5. **段码屏展示模式**：Mac 侧展示模式 ✅；以后 SEG_STATE + 固件外推进度。
 
 ### 顺带要做的
@@ -121,3 +129,5 @@ Agent 会话数（直连模式下暂时没有，见下"顺带要做的"）。
 - Cortex-A5 没有硬件除法，又不链接 libgcc：C 里写 `/`、`%` 会链接失败，用 `app.c` 里的 `udiv()`；64 位除法同理。
 - Windows 上 pyserial 的 `read(n)` 会等满 timeout：读应答用 `read(in_waiting or 1)`，否则每次往返白等 50 ms。
 - 只装了 Command Line Tools 的 Mac 上 `swift test` 会静默跑 0 个用例，用 `swift run monita-cs80-tests`。
+- **PWRKEY 长按之后收不到抬起回调**（实机）：别指望 release 回调，固件靠超时补 UP。注册 `ql_pwrkey_callback_register` 后长按 3 s 不关机。
+- **GPIO13 上没有灯**，红灯在 GPIO29（原厂代码两根一起拉，容易看错）。按键去抖别超过 20 ms，30 ms 会吞掉轻点。

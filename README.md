@@ -30,11 +30,14 @@
 <td align="center"><img src="docs/img/lyrics-paused.png" width="200"><br><sub>歌词页 · 暂停</sub></td>
 <td align="center"><img src="docs/img/lyrics-pure.png" width="200"><br><sub>纯音乐</sub></td>
 <td align="center"><img src="docs/img/lock.png" width="200"><br><sub>锁屏 · 「主人 暂时不在」</sub></td>
+<td align="center"><img src="docs/img/clock.png" width="200"><br><sub>时钟页（≡ 键切换）</sub></td>
 </tr>
 </table>
 
 - 歌词页：CDE/Motif 风格。封面、当前句 + 翻译、进度条；底下 Front Panel 是时钟、日历、Claude 会话数 / 等人提醒、CPU、防睡眠状态。
 - 锁屏：Mac 锁屏时换成桌面壁纸 + 小时钟 + 留言条（名字可配置；拿不到壁纸时回退成上图的 CDE 锁屏框）。
+- 时钟页：按 ≡ 键在歌词页和时钟页之间切换（fw v8）。
+- 按键（fw v8）：`+` / `−` 调 Mac 音量，查询键 播放 / 暂停，≡ 切页。状态灯：播放中绿灯常亮；没连上 Mac 时蓝灯 2 s 亮 1 s 灭（同原厂心跳）。
 
 段码屏展示模式（示意图，代码画的，按功能分区摆放，不是玻璃的真实排布）：
 
@@ -49,7 +52,8 @@
 | 基带 | 原厂 R05，**不降级** |
 | 大屏 | 800×1280 MIPI，RGB565，video 模式持续扫描；背光 GPIO 开关 |
 | 小屏 | FG00 段码 LCD，4 COM × 144 SEG，GPIO 软件模拟 I²C 风格总线 |
-| 按键 | 背面 `+` / `−` / 菜单 / 查询 |
+| 按键 | 前面板 4 键：查询 = 模组 PWRKEY，≡ / `+` / `−` = GPIO21 / GPIO8 / GPIO23（低有效） |
+| 状态灯 | 一颗 RGB 灯：红 GPIO29、绿 GPIO19、蓝 GPIO17，高电平亮，只有亮 / 灭 |
 | 连接 | USB（模组的 USB modem 口当数据通道） |
 
 ## 工作原理
@@ -66,7 +70,8 @@ Mac
 CS80 (R05 原厂基带 + 我们的 app @0x60270000)
  ├─ 大屏：开机版权页（fw v7）；RECT/COPY 写进后台缓冲，PRESENT 翻页（三缓冲，滚动 ≈ 24 fps）
  ├─ 段码屏：Mac 每 250 ms 算一帧发 SEG（进度/时长/Mac 电量）；5 s 没收到时固件自己走时钟
- └─ 按键 → 事件回传 Mac（计划：音量 / 播放暂停 / 切页）
+ ├─ 按键（fw v8）→ KEY 事件回传 Mac：音量 / 播放暂停 / 切页
+ └─ 状态灯（fw v8）← LED：Mac 播放中绿灯常亮；没连上时蓝灯心跳
 ```
 
 路线和排期见 [PLAN.md](PLAN.md)。
@@ -77,7 +82,8 @@ CS80 (R05 原厂基带 + 我们的 app @0x60270000)
 fw/                     R05 原生 app
   build.sh              一键：生成桩表 → 编译 → 链接 → 打包 2PPA → 按 loader 规则静态校验
   app.c                 主 app：USB 收帧 → 大屏（三缓冲翻页，拿不到时退回双/单缓冲）/ 段码屏，协议见 docs/protocol.md
-  link/                 协议纯逻辑 proto.h · 跨缓冲 COPY blit.h · 三缓冲 tribuf.h · 诊断 diag.h / zc_diag.h（主机单测 test.sh）
+  link/                 协议纯逻辑 proto.h · 跨缓冲 COPY blit.h · 三缓冲 tribuf.h · 按键 keys.h · 状态灯 led.h · 诊断 diag.h / zc_diag.h（主机单测 test.sh）
+  io/                   按键 keys_hw.h（3 个 GPIO + PWRKEY 回调）· 状态灯 led_hw.h（3 个 GPIO）
   sdk/                  r05_api.h 导入原型 · gen_stubs.py · pack.py · validate.py · app.ld · r05_exports.csv
   fg00/                 段码屏驱动 fg00.h + 段位映射 segmap.h
   lcd/                  大屏上电/帧缓冲 lcd.h · LCDC 寄存器 lcdc.h · 纯色轮换测试 lcd_test.c
@@ -120,6 +126,11 @@ swift build -c release
 .build/release/monita-cs80 --scroll-sim --sample Samples/lyrics-playing.json   # 离线模拟一次切句滚动（COPY 规划）
 .build/release/monita-cs80 --lyrics http://127.0.0.1:8788 --name 主人          # 兼容旧链路 host
 ```
+
+按键和状态灯（直连 + fw v8 才有，固件 HELLO_ACK 的 `caps` 说了算）：`+` / `−` 用 `osascript` 调系统音量（每下 6/100），
+查询键短按 播放 / 暂停（走 mediaremote-adapter 的 `send 2`，目录同 `lyrics.py`：`MONITA_MRA_DIR` 或 `$MONITA_HOME/mediaremote-adapter`），
+≡ 短按切 歌词页 ↔ 时钟页；播放中绿灯常亮，退出（SIGINT / SIGTERM）时先灭灯。`--no-keys` / `--no-led` 分别关掉；
+`--png out.png --clock --sample …` 出时钟页预览。
 
 macOS 上模组的串口类接口是厂商类（0xFF），系统不绑驱动、**没有 `/dev/cu.*`**，所以 `--device usb` 用 IOUSBHost 直接打开接口走 bulk
 （不要 root；接口是独占的，同一时间只能有一个进程开着）。`usb` = 发 HELLO 自动探测（实测固件在接口 7），也可以写死 `usb:7`。

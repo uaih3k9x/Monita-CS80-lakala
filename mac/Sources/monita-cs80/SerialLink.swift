@@ -2,6 +2,8 @@
 // 编帧/拆帧/打包在 MonitaCore/Link.swift；这里是传输抽象 LinkPort、termios 串口（Linux / 有串口驱动时）
 // 和"发一批 + 等 PRESENT 的 ACK"。macOS 上模组接口没有驱动、没有 /dev/cu.*，走 UsbLink.swift（IOKit bulk）。
 // 线程：所有调用经 lock 串行化（渲染线程推帧，link 线程负责重连和心跳）。
+// 设备主动上报的 KEY（fw v8）：任何一次读到的都交给 onKey（在 lock 里调，回调只能排队、不能回调 DeviceLink）；
+// 没有请求在等时由 pollEvents()（keys 线程每 50 ms）去读。
 import Foundation
 import MonitaCore
 
@@ -63,6 +65,11 @@ final class DeviceLink {
     private var seq: UInt8 = 0
     private var errBase: UInt32 = 0
     private(set) var info: HelloInfo?
+    /// 每次连上（HELLO 成功）+1：设备 HELLO 会把灯灭掉，LED 循环据此重发
+    private var gen = 0
+    var generation: Int { lock.lock(); defer { lock.unlock() }; return gen }
+    /// 收到 KEY 时调（持有 lock，只做排队）
+    var onKey: ((KeyEvent) -> Void)?
     var isUp: Bool { lock.lock(); defer { lock.unlock() }; return port != nil }
 
     init(name: String, open: @escaping () -> LinkPort?) { self.name = name; self.open = open }
@@ -72,13 +79,31 @@ final class DeviceLink {
         port = nil; info = nil
     }
 
+    /// 拆帧；KEY 交给 onKey，其余原样返回
+    private func feed(_ data: [UInt8]) -> [LinkFrame] {
+        var rest: [LinkFrame] = []
+        for f in parser.feed(data) {
+            if f.type == LinkType.key { if let e = KeyEvent(f.payload) { onKey?(e) } } else { rest.append(f) }
+        }
+        return rest
+    }
+
     private func wait(type: UInt8, seq want: UInt8, timeoutMs: Int) -> [UInt8]? {
         let end = Date().addingTimeInterval(Double(timeoutMs) / 1000)
         while Date() < end {
             guard let port, let data = port.read(timeoutMs: 50) else { drop("读失败"); return nil }
-            for f in parser.feed(data) where f.type == type && f.seq == want { return f.payload }
+            // 同一段字节里应答后面可能还跟着 KEY：整段拆完再返回
+            if let f = feed(data).first(where: { $0.type == type && $0.seq == want }) { return f.payload }
         }
         return nil
+    }
+
+    /// 不等任何应答，只把已经到了的字节读掉（收 KEY 用）
+    func pollEvents() {
+        lock.lock(); defer { lock.unlock() }
+        guard let port, info != nil else { return }
+        guard let data = port.read(timeoutMs: 0) else { drop("读失败"); return }
+        if !data.isEmpty { _ = feed(data) }
     }
 
     private func call(_ type: UInt8, _ payload: [UInt8] = [], replyType: UInt8 = LinkType.ack, timeoutMs: Int = 2000) -> [UInt8]? {
@@ -104,7 +129,7 @@ final class DeviceLink {
             drop("HELLO 没有应答"); return false
         }
         guard h.width == screenW, h.height == screenH, h.pixfmt == 1 else { drop("屏参数不符 \(h)"); return false }
-        info = h; errBase = 0
+        info = h; errBase = 0; gen += 1
         log("设备已连上 \(name)：fw=\(h.fw) caps=\(h.caps)\(h.doubleBuffered ? "（双缓冲）" : "") max_payload=\(h.maxPayload)")
         return true
     }

@@ -3,13 +3,21 @@ import Foundation
 
 public enum ScreenMode: Equatable {
     case lyrics          // 正常：歌词页
+    case clock           // 纯时钟页（≡ 键切换，fw v8）
     case lockWallpaper   // Mac 锁屏：整屏壁纸 + 小时钟
     case yieldToSaver    // 旧链路 host 自己在播视频屏保：让路，不抢屏
 }
 
-public func screenMode(locked: Bool, saverPlaying: Bool) -> ScreenMode {
+/// 用户选的页（≡ 键短按切换）；锁屏 / 屏保优先于它
+public enum Page: Equatable {
+    case lyrics, clock
+    public var toggled: Page { self == .lyrics ? .clock : .lyrics }
+}
+
+public func screenMode(locked: Bool, saverPlaying: Bool, page: Page = .lyrics) -> ScreenMode {
     if saverPlaying { return .yieldToSaver }
-    return locked ? .lockWallpaper : .lyrics
+    if locked { return .lockWallpaper }
+    return page == .clock ? .clock : .lyrics
 }
 
 public struct FillRect: Equatable {

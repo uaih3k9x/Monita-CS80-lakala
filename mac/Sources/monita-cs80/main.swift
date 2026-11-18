@@ -27,6 +27,8 @@
 //   --dry-run --lock：假装一直锁屏（测锁屏耗电用，不推帧）
 //   段码屏（直连时）：背面数码管显示播放进度 / 时长，没在播显示时钟日期，电池区 = Mac 电量，见 Seg.swift；--no-seg 不接管
 //   --seg-png out.png：段码屏离线示意图；配 --sample 时画 播放中 / 暂停 / 没在播 三行
+//   按键 / 状态灯（直连 + fw v8，见 Controls.swift）：+/− 系统音量，≡ 切 歌词页 ↔ 时钟页，查询 播放/暂停；
+//   播放中绿灯常亮。--no-keys / --no-led 关掉；--png out.png --clock 出时钟页预览
 import AppKit
 import MonitaCore
 import CoreGraphics
@@ -53,6 +55,9 @@ var pngPath: String?
 var dryRun = false
 var pngLock = false
 var segOn = true
+var keysOn = true
+var ledOn = true
+var pngClock = false
 var segPngPath: String?
 do {
     var args = CommandLine.arguments.dropFirst().makeIterator()
@@ -76,9 +81,12 @@ do {
         case "--dry-run": dryRun = true
         case "--lock": pngLock = true
         case "--no-seg": segOn = false
+        case "--no-keys": keysOn = false
+        case "--no-led": ledOn = false
+        case "--clock": pngClock = true
         case "--seg-png": segPngPath = args.next()
         default:
-            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--seg-png out.png [--sample lyrics.json [--at 秒]]]")
+            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock]")
             exit(a == "-h" || a == "--help" ? 0 : 2)
         }
     }
@@ -131,6 +139,7 @@ final class Shared {
     private var _lastSidecar = ""
     private var _locked = false
     private var _lockedSince: Date?
+    private var _page = Page.lyrics
     // 唤醒：渲染循环等 _kicked，暂停中的轮询线程等解锁；任何影响画面的状态变化都 broadcast
     private let cond = NSCondition()
     private var _kicked = false
@@ -177,6 +186,8 @@ final class Shared {
         }
     }
     var lockedSince: Date? { with { $0._lockedSince } }
+    /// ≡ 键切换的页（锁屏 / 屏保优先于它）
+    var page: Page { get { with { $0._page } } set { set { let c = $0._page != newValue; $0._page = newValue; return c } } }
     func requestFull() { with { $0._markFull = true }; kick() }
     func takeFull() -> Bool { with { let v = $0._markFull; $0._markFull = false; return v } }
 }
@@ -327,10 +338,16 @@ func render(_ inp: PageInput) -> [UInt16] {
     return canvasBGR565()
 }
 
+func renderClock(_ inp: PageInput) -> [UInt16] {
+    page.drawClock(inp)
+    return canvasBGR565()
+}
+
 /// 画面依赖的全部输入；和上一帧相同就不画
 enum FrameKey: Equatable {
     case lock(LockFrameKey)
     case lyrics(LyricsFrameKey, coverURL: String, hasCover: Bool, cfg: PageConfig, panel: PanelInfo, scroll: Int)
+    case clock(minute: Int, panel: PanelInfo)
 }
 
 func posted(_ r: (Int, [UInt8])?) -> Bool {
@@ -387,7 +404,9 @@ if let png = pngPath {
         fetchLayout(); fetchLyrics(); fetchAgents(); readSleepGuard()
         sampleCPU(); Thread.sleep(forTimeInterval: 0.5); sampleCPU()
     }
-    if pngLock { if samplePath == nil { wallpaper.refresh() }; _ = renderLock(Date(), since: samplePath == nil ? nil : Date(timeIntervalSinceNow: -25 * 60)) } else { _ = render(lyricsInput(Date()).0) }
+    if pngLock { if samplePath == nil { wallpaper.refresh() }; _ = renderLock(Date(), since: samplePath == nil ? nil : Date(timeIntervalSinceNow: -25 * 60)) }
+    else if pngClock { _ = renderClock(lyricsInput(Date()).0) }
+    else { _ = render(lyricsInput(Date()).0) }
     let ok = canvas.writePNG(png)
     print(ok ? "wrote \(png)" : "write failed")
     exit(ok ? 0 : 1)
@@ -426,6 +445,9 @@ if let link {
     every(5.0, "agents", pauseWhenLocked: true, fetchAgents)
 }
 if let link, segOn { startSegLoop(link) }
+if let link, keysOn { startKeys(link) }
+if let link, ledOn { startLed(link) }
+installExitHandler(link, led: ledOn)
 every(2.0, "cpu", pauseWhenLocked: true, sampleCPU)
 every(5.0, "sleep", pauseWhenLocked: true, readSleepGuard)
 every(5.0, "lockpoll") {
@@ -459,7 +481,7 @@ var statsAt = nowMs()
 func tick() -> Double {
     stats.wakes += 1
     if shared.takeFull() { fullNeeded = true }
-    let m = screenMode(locked: shared.locked, saverPlaying: shared.saver)
+    let m = screenMode(locked: shared.locked, saverPlaying: shared.saver, page: shared.page)
     if m != mode {
         log("画面切换：\(mode) → \(m)")
         mode = m
@@ -486,8 +508,12 @@ func tick() -> Double {
 
     let key: FrameKey
     var inp: PageInput?
+    var clockInp: PageInput?
     if m == .lockWallpaper {
         key = .lock(lockFrameKey(nowS: now.timeIntervalSince1970, sinceS: since?.timeIntervalSince1970))
+    } else if m == .clock {
+        clockInp = lyricsInput(now).0
+        key = .clock(minute: Int((now.timeIntervalSince1970 / 60).rounded(.down)), panel: clockInp!.panel)
     } else {
         let (i, url) = lyricsInput(now)
         inp = i
@@ -498,7 +524,7 @@ func tick() -> Double {
     if !fullNeeded && !retry && key == lastKey { return wake() }
 
     let t0 = nowMs()
-    let buf = inp.map(render) ?? renderLock(now, since: since)
+    let buf = inp.map(render) ?? clockInp.map(renderClock) ?? renderLock(now, since: since)
     stats.ticks += 1
     stats.renderMs += nowMs() - t0
     let dirty = prev.map { diffTiles($0, buf) } ?? []

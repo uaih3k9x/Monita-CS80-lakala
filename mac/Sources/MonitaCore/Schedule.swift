@@ -73,7 +73,7 @@ public func nextWake(mode: ScreenMode, active: Bool, playing: Bool, retry: Bool,
         return nextLockChange(nowS: nowS, sinceS: sinceS) + boundaryEpsS
     case .lyrics where playing:
         return nowS + tickS
-    case .lyrics:
+    case .lyrics, .clock:
         return ((nowS / 60).rounded(.down) + 1) * 60 + boundaryEpsS
     case .yieldToSaver:
         return nowS + inactiveWakeS
