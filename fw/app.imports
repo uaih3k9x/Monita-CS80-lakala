@@ -1,4 +1,4 @@
-# R05 core_stub imports for app.c (USB 通道 + 大屏推帧 + 段码屏)。每行一个名字; "名字 = 0xHASH" 用于名字未解出的导出。
+# R05 core_stub imports for app.c (USB 通道 + 大屏推帧 + 段码屏 + 按键 + 状态灯)。每行一个名字; "名字 = 0xHASH" 用于名字未解出的导出。
 ql_pin_set_func
 ql_gpio_init
 ql_gpio_deinit
@@ -24,3 +24,9 @@ r05_lcd_pm_lock = 0xac3ae871
 malloc
 free
 ql_dev_memory_size_query
+# 按键 (io/keys_hw.h) / 状态灯 (io/led_hw.h, 只用上面的 gpio 接口)
+ql_gpio_get_level
+ql_pwrkey_shutdown_time_set
+ql_pwrkey_callback_register
+ql_pwrkey_press_cb_register
+ql_pwrkey_release_cb_register

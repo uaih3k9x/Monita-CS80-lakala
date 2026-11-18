@@ -9,6 +9,10 @@
  * 开机画面 (v7): 版权页 (lcd/bootscreen.h, EDK2 UEFI 字体), 画在前台缓冲; Link 行黄色 WAIT, 第一条 HELLO 改绿色 OK,
  *   之后主机推帧接管全屏。
  * 段码屏: 主区 "------"; HELLO 带了时间后小时钟走 hh:mm:ss。主机发过 SEG 后 5 s 内由主机接管整块显存。
+ * 按键 (v8): 主循环每 ≈ 10 ms 采样 (io/keys_hw.h), 去抖/长按在 link/keys.h; HELLO 之后才发 KEY (0x90), 同一任务里写, 不和应答交错。
+ * 状态灯 (v8): link/led.h 状态机, 主循环每轮算一次掩码, 变了才写 GPIO (不开任务、不忙等)。
+ *   未连接: 蓝灯 2 s 亮 1 s 灭 (同原厂常态心跳); HELLO 后熄灭, 交给主机 LED (0x31);
+ *   HELLO 之后 LINK_LOST_US 收不到任何字节 = 主机走了, 回到蓝灯心跳, 也不再发 KEY。
  *
  * 入口约定 (照原厂): enter 里只配看门狗 + 建任务就返回, 不得阻塞; 任务 prio 12, 7 参数, event_count = 1。
  */
@@ -17,12 +21,16 @@
 #include "lcd.h"
 #include "proto.h"
 #include "blit.h"
+#include "keys_hw.h"
+#include "led_hw.h"
 
-#define FW_VER       0x0007u          /* 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
+#define FW_VER       0x0008u          /* 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
 #define MAX_PAYLOAD  32768u          /* 800 x 20 行 RGB565 + 8 字节头 = 32008, 放得下一条整行带 */
 #define RX_CHUNK     16384u
 #define PORT         R05_PORT_USB_MODEM
 #define SEG_HOST_HOLD_US 5000000u    /* 主机发 SEG 后这么久内固件不画自己的段码 */
+#define LINK_LOST_US 15000000u       /* HELLO 之后这么久没收到字节 = 主机不在了 (主机连着时至少每 2 s 一个 PING) */
+#define KEY_SAMPLE_MS 8u             /* 按键最短采样间隔 (1.024 ms 单位); 主循环空闲时 10 ms 醒一次 */
 
 static uint8_t  g_pl[MAX_PAYLOAD] __attribute__((aligned(4)));
 static uint8_t  g_rx[RX_CHUNK] __attribute__((aligned(4)));
@@ -36,6 +44,7 @@ static struct {
 } st;
 
 static uint32_t now_us(void){ return (uint32_t)osiUpTimeUS(); }   /* 只用来做差, 71 分钟回绕无所谓 */
+static uint32_t now_ms(void){ return (uint32_t)(osiUpTimeUS() >> 10); }   /* 1.024 ms 单位 (同 ACK.uptime), 按键/状态灯用 */
 
 /* Cortex-A5 没有硬件除法, 不链接 libgcc: 自己做 32 位无符号除法 (只在每秒刷时钟时用) */
 static uint32_t udiv(uint32_t n, uint32_t d, uint32_t *rem){
@@ -306,6 +315,32 @@ static void ack(uint8_t status, uint32_t extra){
     reply(LK_ACK, b, 40);
 }
 
+/* ---- 按键 / 状态灯 (fw v8) ---- */
+static int      g_link;                /* 收到过 HELLO 且主机还在 (LINK_LOST_US 内有字节) */
+static uint32_t g_keys_ok, g_led_ok;   /* 硬件初始化成功 -> caps 位 */
+static keys_t   g_keys;
+static pwr_t    g_pwr;
+static uint32_t g_key_n, g_key_at;
+static led_t    g_led;
+
+static void led_default(void){ led_blink(&g_led, LED_B, 3000u, 2000u, now_ms()); }   /* 未连接: 蓝灯 2 s 亮 1 s 灭 */
+
+static void keys_poll(void){
+    if (!g_keys_ok) return;
+    uint32_t t = now_ms();
+    if (t - g_key_at < KEY_SAMPLE_MS) return;
+    g_key_at = t;
+    uint8_t ev[KEY_N * 2];
+    int n = keys_feed(&g_keys, t, keys_hw_raw(&g_pwr, t), ev, (int)sizeof ev);
+    for (int i = 0; i < n && g_link; i++){                 /* 没连主机: 照样走状态机, 只是不发 */
+        uint8_t pl[KEY_PL_LEN], out[LK_HDR + KEY_PL_LEN + LK_TRAIL];
+        keys_payload(pl, ev[i], g_key_n++, t);
+        ql_uart_write(PORT, out, lk_encode(out, LK_KEY, 0, pl, KEY_PL_LEN));
+    }
+}
+
+static void led_poll(void){ if (g_led_ok) led_hw_apply(led_step(&g_led, now_ms())); }
+
 static void on_frame(void){
     const uint8_t *pl = g_pl; uint32_t n = g_p.len;
     if (g_p.type == LK_RECT || g_p.type == LK_COPY || g_p.type == LK_DIAG) g_boot_live = 0;   /* 主机开始画了 / 诊断可能动缓冲 */
@@ -331,11 +366,14 @@ static void on_frame(void){
         g_p.frames = 1; g_p.crc_err = 0; g_p.len_err = 0;      /* 计数从这条 HELLO 重新算 */
         if (n >= 6) clk_set((uint32_t)lk_rd16(pl) | ((uint32_t)lk_rd16(pl + 2) << 16), (int16_t)lk_rd16(pl + 4));
         boot_link_ok();                                /* 开机画面还在: Link 行 WAIT -> OK */
+        g_link = 1; g_key_n = 0;                       /* KEY 计数从这条 HELLO 重新算 */
+        led_off(&g_led); led_poll();                   /* 灯交给主机 */
         uint8_t *b = g_tx;
         lk_wr16(b + 0, LK_PROTO_VER); lk_wr16(b + 2, FW_VER);
         lk_wr16(b + 4, LCD_W); lk_wr16(b + 6, LCD_H);
         b[8] = LK_PIXFMT_RGB565; b[9] = 72;
-        lk_wr16(b + 10, LK_CAP_FBCRC | LK_CAP_COPY | (g_tb.n > 1 ? LK_CAP_DOUBLEBUF : 0u) | (g_tb.n > 2 ? LK_CAP_TRIBUF : 0u)); lk_wr16(b + 12, MAX_PAYLOAD); lk_wr16(b + 14, 0);
+        lk_wr16(b + 10, LK_CAP_FBCRC | LK_CAP_COPY | (g_tb.n > 1 ? LK_CAP_DOUBLEBUF : 0u) | (g_tb.n > 2 ? LK_CAP_TRIBUF : 0u)
+                         | (g_keys_ok ? LK_CAP_KEYS : 0u) | (g_led_ok ? LK_CAP_LED : 0u)); lk_wr16(b + 12, MAX_PAYLOAD); lk_wr16(b + 14, 0);
         reply(LK_HELLO_ACK, b, 16);
         if (!seg_host_active(now_us())) seg_draw_local();
         return;
@@ -351,6 +389,11 @@ static void on_frame(void){
         if (n != 1){ ack(LK_EPARAM, 0); return; }
         lcd_backlight(pl[0]);
         ack(LK_OK, 0);
+        return;
+    case LK_LED:
+        if (!g_led_ok){ ack(LK_EUNSUP, 0); return; }
+        ack(led_cmd(&g_led, pl, n, now_ms()) ? LK_EPARAM : LK_OK, 0);
+        led_poll();
         return;
     case LK_FBCRC: {
         uint32_t c = 0;                                /* 校验的是最新提交的那块 (已显示, 或下一个帧头显示) */
@@ -427,14 +470,19 @@ static void task_entry(void *arg){
         show_err(lcd_err);                             /* 大屏起不来也照样开 USB, 方便查 */
     }
 
+    g_led_ok = led_hw_init() == 0;
+    led_init(&g_led); led_default(); led_poll();
+    keys_init(&g_keys); pwr_init(&g_pwr);
+
     lk_init(&g_p, g_pl, MAX_PAYLOAD);
     ql_rtos_semaphore_create(&g_sem, 0);
     ql_uart_open(PORT);
     ql_uart_register_cb(PORT, uart_cb);
+    g_keys_ok = (keys_hw_init() & 7u) == 0;            /* PWRKEY 注册失败只少键 1, 其余照用 */
 
     uint32_t last_rx = now_us(), last_wdt = last_rx;
     for (;;){
-        ql_rtos_semaphore_wait(g_sem, 20);
+        ql_rtos_semaphore_wait(g_sem, 10);            /* 10 ms: 按键采样节拍 (v7 是 20) */
         for (;;){
             int r = ql_uart_read(PORT, g_rx, RX_CHUNK);
             if (r <= 0) break;
@@ -446,6 +494,7 @@ static void task_entry(void *arg){
                 if (ev) on_frame();
             }
             last_rx = now_us();
+            keys_poll();                               /* 整帧连续推 ≈ 300 ms 时也照常采样 */
         }
         uint32_t t = now_us();
         tb_poll();                                     /* 待锁存的过了帧头 -> 记成正在扫描 */
@@ -453,6 +502,9 @@ static void task_entry(void *arg){
         if (!lk_idle(&g_p) && t - last_rx > 500000u) lk_reset(&g_p);   /* 半截帧: 丢掉重新找同步字 */
         if (t - last_wdt > 1000000u){ ql_dev_feed_wdt(); last_wdt = t; }
         if (lcd_err == 0) clk_tick(t);
+        if (g_link && t - last_rx > LINK_LOST_US){ g_link = 0; led_default(); }   /* 主机走了: 回到未连接心跳 */
+        keys_poll();
+        led_poll();
     }
 }
 

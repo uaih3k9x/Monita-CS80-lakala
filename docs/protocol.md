@@ -1,6 +1,7 @@
 # 上位机 ↔ R05 固件协议 v0
 
 > 状态：**v0，已实现并实机跑通**（固件 `fw/app.c` + `fw/link/proto.h`，参考上位机 `tools/host-ref/`、`mac/`）。
+> fw v8 加的 KEY / LED 是向后兼容的增量（`caps` 新位，`proto_ver` 不变），**还没上机**。
 > 协议与平台无关：能打开 USB 串口、能画一张 800×1280 的图，就能当上位机。以后改动会升 `proto_ver`。
 
 设计原则：**简单、流式、设备侧不需要大缓冲**。设备 app 只有 128 KiB RAM，一帧 payload 最多 32 KiB，
@@ -12,7 +13,7 @@
 - 主机侧：Windows 上是设备管理器里的 **"Quectel USB Modem"**（COMx，实测一台机器上是 COM5）；
   macOS 上**没有串口设备**（这些接口是厂商类 0xFF，系统不绑驱动），直接用 IOKit 打开 USB **接口 7**
   （VID 0x2c7c PID 0x0901；bulk IN 0x8A / OUT 0x07，另有一个中断 IN 0x89 不用，不需要 DTR），见 `mac/Sources/monita-cs80/UsbLink.swift`；Linux 上一般是 `/dev/ttyUSB*` / `/dev/ttyACM*`。**不用设波特率**（USB 虚拟串口，随便填）。
-- 主机是主动方：设备只回应答，不主动发东西（以后的按键事件除外）。
+- 主机是主动方：设备只回应答，不主动发东西。唯一的例外是 fw v8 的按键事件 KEY（0x90），只在收到过 HELLO 之后发。
 - USB 自带流控：主机尽管往里写，设备处理不过来时主机侧写会变慢，不丢数据（实测连续 16 MB 无丢失）。
   唯一见过的丢数据是**设备刚开机、USB 刚枚举**那一下，所以主机连上后先 HELLO、再推整帧。
 
@@ -38,6 +39,9 @@ CRC-32/IEEE 就是 zlib / PNG / Ethernet 用的那个（Python `zlib.crc32`，`"
 **应答规则只有一条：除了 RECT，每一条合法的主机帧都恰好有一条应答**（HELLO → HELLO_ACK，DIAG → DIAG_R，其余 → ACK）。
 RECT 不应答，所以可以连续成批地写，不用等。
 
+设备主动发的只有 KEY（0x90，`seq` = 0），可能夹在任何两条应答之间。主机拆帧时按 type 分开：等应答时把 KEY 交给按键处理，不要丢；
+不认识 KEY 的旧上位机按 type + seq 过滤应答，会自然忽略它。
+
 ## 消息
 
 | type | 方向 | 名称 | payload | 应答 |
@@ -48,10 +52,12 @@ RECT 不应答，所以可以连续成批地写，不用等。
 | 0x21 | → | PRESENT | `u16 frame_id` | ACK（extra = 提交耗时 µs） |
 | 0x22 | → | COPY | `u16 sx, sy, w, h, dx, dy`（fw v2，`caps` bit2） | 无 |
 | 0x30 | → | BACKLIGHT | `u8 on`（0 灭，非 0 亮） | ACK |
+| 0x31 | → | LED | `u8 mask, u8 mode, u16 period_ms, u16 on_ms, u16 duration_ms`（fw v8，`caps` bit5，见下） | ACK |
 | 0x40 | → | FBCRC | `u16 x, y, w, h` | ACK（extra = 这块像素的 CRC-32） |
 | 0x50 | → | DIAG | `u8 op` + 参数（诊断用，不稳定，见 `fw/link/diag.h`，op 表见下文 "DIAG"） | DIAG_R (0xD0) |
 | 0x7F | → | PING | 空 | ACK |
 | 0x81 | ← | HELLO_ACK | 见下 | |
+| 0x90 | ← | KEY | `u8 key, u8 ev, u16 n, u32 uptime`（fw v8，`caps` bit4，见下） | 主机不应答 |
 | 0xFE | ← | ACK | 见下 | |
 
 ### HELLO / HELLO_ACK
@@ -70,7 +76,8 @@ u16 width         800
 u16 height        1280
 u8  pixfmt        1 = RGB565 小端 (R 在高 5 位)
 u8  seg_bytes     72
-u16 caps          bit0 FBCRC；bit1 DOUBLEBUF（双缓冲，见 PRESENT）；bit2 COPY（fw v2）；bit3 TRIBUF（三缓冲，fw v6）
+u16 caps          bit0 FBCRC；bit1 DOUBLEBUF（双缓冲，见 PRESENT）；bit2 COPY（fw v2）；bit3 TRIBUF（三缓冲，fw v6）；
+                  bit4 KEYS（按键上报，fw v8）；bit5 LED（状态灯，fw v8）
 u16 max_payload   32768
 u16 0
 ```
@@ -146,6 +153,42 @@ u8  pixels[w*h*2]    RGB565 小端，行优先；payload 长度必须正好 8 + 
   主区 `------`，小时钟走 HELLO 给的时间（没给过时间就只有 `------`）。
 - 一次 SEG 往返约 25 ms（GPIO 模拟总线），1 Hz 左右更新就够。
 
+### KEY（0x90，设备 → 主机，fw v8）
+
+前面板 4 个键，设备去抖后上报。**只在收到过 HELLO 之后发**；HELLO 把计数 `n` 清零；HELLO 之后 15 s 收不到主机任何字节（主机连着时至少每 2 s 一个 PING），
+设备当主机已经走了，停止上报，直到下一条 HELLO。帧头 `seq` = 0，不对应任何主机帧，主机**不应答**。
+
+```
+u8  key       1 查询（左上，PWRKEY）  2 ≡（左下）  3 +（右上）  4 −（右下）
+u8  ev        1 DOWN  2 UP  3 LONG（按住满 1 s，每次按下最多一次；之后松开照样有 UP）
+u16 n         HELLO 以来第几个事件（回绕）；主机可以据此发现丢事件
+u32 uptime    事件时刻，1.024 ms 单位，同 ACK.uptime
+```
+
+- 去抖 16 ms（实机：30 ms 会把很快的轻点滤掉；GPIO 键另有硬件去抖），固件主循环 ≈ 10 ms 采样一次。
+- 查询键是模组的 PWRKEY：实机长按之后内核不再给"抬起"回调，固件在按下 4 s 后仍没抬起就自己补一个 UP（之后迟到的抬起被吞掉）。
+  所以主机看到 `LONG` 之后的 `UP` 不一定是真的松手时刻；短按判定用"DOWN → UP 之间没有 LONG"。
+- 没有自动重复（按住连加）；主机要的话可以拿 DOWN 到 UP 的时长自己做。
+- 参考做法（`mac/`）：+ / − 在 DOWN 时调音量；≡、查询 在 UP 时判短按（切页 / 播放暂停）。
+
+### LED（0x31，fw v8）
+
+正面一颗 RGB 状态灯，只有亮 / 灭 / 闪烁（没有调光、呼吸）。
+
+```
+u8  mask          bit0 红  bit1 绿  bit2 蓝（可混 7 色），其余位必须为 0
+u8  mode          0 灭  1 常亮  2 闪烁
+u16 period_ms     闪烁周期，0 = 1000，最小 40
+u16 on_ms         闪烁中亮的时长，0 = 周期的一半；必须 < period_ms
+u16 duration_ms   0 = 一直保持；否则到时自动灭
+```
+
+- payload 必须正好 8 字节、参数合法，否则 ACK `status` = 1，灯不变；固件没有灯（`caps` 没有 bit5）时回 3。
+- 闪烁从"亮"开始；相位抖动等于固件主循环间隔（≈ 10 ms，PRESENT 等帧时最长 ≈ 55 ms），对状态灯无所谓。时间按 1.024 ms 计，长 2.4%。
+- 设备自己的灯语：**未连接时蓝灯 2 s 亮 1 s 灭**（同原厂常态心跳）；HELLO 把灯灭掉，之后完全由主机控制；主机走了（见 KEY）回到蓝灯心跳。
+  所以主机每次重连都要把自己想要的灯重发一次。
+- 参考做法（`mac/`）：播放中绿灯常亮，暂停 / 没在放熄灭；退出时发 `mode = 0`。
+
 ### DIAG（0x50，诊断用，不稳定）
 
 回包 DIAG_R：`u8 op, u8 status, u16 n, n × u32`，**n ≤ 16**（载荷 ≤ 68 B）。
@@ -191,6 +234,6 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 
 ## 以后
 
-- 按键事件（设备 → 主机）、SEG 的高层字段（播放进度由固件外推）、段码屏断开后独立时钟。
+- SEG 的高层字段（播放进度由固件外推）。按键事件和状态灯已在 fw v8 加上（KEY / LED）。
 - 如果需要更快的整帧：简单 RLE 作为新的 RECT 编码（新 type，`caps` 新位）。
 - ~~双缓冲 PRESENT 的第二次等帧~~：已确认基址帧头锁存，fw v4 起默认立即翻页。

@@ -25,11 +25,13 @@
 #define LK_RECT      0x20u   /* u16 x,y,w,h + w*h 个 RGB565 */
 #define LK_PRESENT   0x21u   /* u16 frame_id */
 #define LK_BACKLIGHT 0x30u   /* u8 on */
+#define LK_LED       0x31u   /* u8 mask, u8 mode, u16 period_ms, u16 on_ms, u16 duration_ms (fw v8, link/led.h) */
 #define LK_COPY      0x22u   /* u16 sx,sy,w,h,dx,dy: 画布内搬矩形 (允许重叠), 不应答 */
 #define LK_FBCRC     0x40u   /* u16 x,y,w,h -> ACK 带 crc32 */
 #define LK_PING      0x7Fu
 /* 设备 -> 主机 */
 #define LK_HELLO_ACK 0x81u
+#define LK_KEY       0x90u   /* u8 key, u8 ev, u16 n, u32 uptime (fw v8, link/keys.h); 主动上报, seq = 0, 主机不应答 */
 #define LK_ACK       0xFEu
 
 /* ACK status */
@@ -42,6 +44,8 @@
 #define LK_CAP_DOUBLEBUF 0x0002u   /* PRESENT 是翻页 (RECT 写后台, PRESENT 前不可见) */
 #define LK_CAP_COPY      0x0004u   /* 支持 COPY (0x22) */
 #define LK_CAP_TRIBUF    0x0008u   /* 三缓冲 (fw v6): PRESENT 后下一批不用等帧头 */
+#define LK_CAP_KEYS      0x0010u   /* 按键上报 KEY (0x90), fw v8 */
+#define LK_CAP_LED       0x0020u   /* 状态灯 LED (0x31), fw v8 */
 #define LK_PIXFMT_RGB565 1u
 
 /* ---- CRC-32/IEEE (反射, 多项式 0xEDB88320, 初值/终值异或 0xFFFFFFFF) ----

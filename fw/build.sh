@@ -15,7 +15,7 @@ CC=arm-none-eabi-gcc
 # -fno-tree-vectorize: 不生成 NEON (任务切换是否保存 VFP 现场未证实); validate.py 也会查
 CFLAGS="-mcpu=cortex-a5 -mthumb -mfpu=neon-vfpv4 -mfloat-abi=hard -mlong-calls \
   -Os -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-tree-vectorize \
-  -ffunction-sections -fdata-sections -Wall -Wextra -Werror -nostdlib -Isdk -Ifg00 -Ilcd -Ilink"
+  -ffunction-sections -fdata-sections -Wall -Wextra -Werror -nostdlib -Isdk -Ifg00 -Ilcd -Ilink -Iio"
 
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=(app lcd/lcd_test)

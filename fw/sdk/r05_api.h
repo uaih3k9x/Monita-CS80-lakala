@@ -15,6 +15,19 @@ extern int  ql_gpio_set_direction(uint32_t gpio, uint32_t dir);
 #define GPIO_INPUT  0u
 #define GPIO_OUTPUT 1u
 #define PULL_NONE   0u
+#define PULL_DOWN   1u   /* 内核 ql_gpio_set_pull: 1 -> pad 下拉位, 其它非 0 -> 上拉位 */
+#define PULL_UP     2u
+/* 原厂按键回调里: ql_gpio_get_level(gpio, &u8); 内核按方向读输入/输出寄存器, 写 1 字节 0/1 */
+extern int  ql_gpio_get_level(uint32_t gpio, uint8_t *lvl);
+
+/* ---- PWRKEY (原厂按键模块照此顺序注册; 回调无参, 原厂回调里只 ql_rtos_event_send) ----
+ * 长按到 shutdown_time 后, 注册了 callback_register 的回调就只调它, 不走默认关机 (实机: 长按不关机)。
+ * shutdown_time 下限 420 ms (更小返回错误)。实机: 长按之后收不到 release 回调 (见 link/keys.h)。 */
+typedef void (*r05_pwrkey_cb_t)(void);
+extern int  ql_pwrkey_shutdown_time_set(uint32_t ms);
+extern int  ql_pwrkey_callback_register(r05_pwrkey_cb_t cb);
+extern int  ql_pwrkey_press_cb_register(r05_pwrkey_cb_t cb);
+extern int  ql_pwrkey_release_cb_register(r05_pwrkey_cb_t cb);
 
 /* ---- rtos ----
  * 原厂: ql_rtos_task_create(&t, 0x4000, 12, "ql_init", fn, NULL, 1)
