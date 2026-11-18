@@ -69,3 +69,55 @@ import MonitaCore
     #expect(frames.map(\.seq) == [255, 0] && presentSeq == 0 && seq == 0)
     #expect(frames[1].payload == [3, 0])
 }
+
+// MARK: 和固件对照出来的几处 (tools/fwsim)
+
+@Test func diagReplyTypeAndProto() {
+    #expect(LinkType.diagR == 0xD0)
+    #expect(linkProtoVer == 0)
+    let h = HelloInfo([1, 0, 9, 0, 0x20, 0x03, 0x00, 0x05, 1, 72, 0x7F, 0, 0x00, 0x40, 0, 0])
+    #expect(h?.proto == 1 && h?.protoSupported == false)
+    #expect(h?.rectPayloadMax == 16384)
+    let big = HelloInfo([0, 0, 9, 0, 0x20, 0x03, 0x00, 0x05, 1, 72, 0x7F, 0, 0xFF, 0xFF, 0, 0])
+    #expect(big?.protoSupported == true && big?.rectPayloadMax == linkMaxPayload)
+}
+
+@Test func diagStatusMustBeZero() {
+    #expect(diagReplyOK([11, 0, 1, 0, 1, 0, 0, 0]))
+    #expect(!diagReplyOK([11, 3, 0, 0]))        // EUNSUP (不认识 / 沉浸模式里)
+    #expect(!diagReplyOK(nil))
+    #expect(!diagReplyOK([11]))
+}
+
+@Test func presentAckNeedsStatusOK() {
+    var pl: [UInt8] = [0x21, 1, 0, 0]               // 沉浸模式里 PRESENT 回 EPARAM
+    for _ in 0..<9 { pl += [0, 0, 0, 0] }
+    let a = AckStats(pl)!
+    #expect(!presentAckOK(a, errBase: 0))
+    pl[1] = 0
+    #expect(presentAckOK(AckStats(pl)!, errBase: 0))
+    pl[28] = 1                                       // bad_param 比基线多了
+    #expect(!presentAckOK(AckStats(pl)!, errBase: 0))
+}
+
+@Test func regionCRCMatchesBytes() {
+    let w = 5, h = 3
+    let buf = (0..<(w * h)).map { UInt16($0 * 0x0101 + 7) }
+    var b: [UInt8] = []
+    for y in 1..<3 { for x in 2..<4 { let v = buf[y * w + x]; b += [UInt8(v & 0xFF), UInt8(v >> 8)] } }
+    #expect(fbRegionCRC(buf, x: 2, y: 1, w: 2, h: 2, width: w) == linkCRC32(b))
+}
+
+@Test func immStripsFollowDeviceMaxPayload() {
+    #expect(immStrips(rows: 0..<45, width: 800) == [0..<20, 20..<40, 40..<45])
+    #expect(immStrips(rows: 100..<130, width: 800, maxPayload: 16384) == [100..<110, 110..<120, 120..<130])
+}
+
+@Test func immRectPayloadsSplitByDeviceMax() {
+    let buf = (0..<(800 * 25)).map { UInt16($0 & 0xFFFF) }
+    let ps = immRectPayloads(y: 1000, rows: 3..<25, visible: true, buf, width: 800, maxPayload: 16384)
+    #expect(ps.count == 3)                           // 10 + 10 + 2 行
+    #expect(ps.allSatisfy { $0.count <= 16384 })
+    #expect(ps[0] == immRectPayload(y: 1003, x: 0, w: 800, rows: 3..<13, visible: true, buf, width: 800))
+    #expect(ps[2] == immRectPayload(y: 1023, x: 0, w: 800, rows: 23..<25, visible: true, buf, width: 800))
+}

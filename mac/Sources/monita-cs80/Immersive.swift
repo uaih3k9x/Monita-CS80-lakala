@@ -35,6 +35,7 @@ final class ImmersiveDriver {
         guard active else { return }
         if let a = link.request(LinkType.immExit).flatMap(AckStats.init) {
             _ = link.newErrors(a)
+            if a.status == 0 { link.updateCaps(Int(a.extra)) }   // 退出后多缓冲可能拿不全
             log(String(format: "沉浸模式：退出，caps=0x%X", a.extra))
         }
     }
@@ -83,15 +84,14 @@ final class ImmersiveDriver {
     /// 每个写：把那一块按档位画到画布顶上，取需要的行，切成 IMM_RECT 条带
     private func write(_ ws: [ImmWrite], _ c: ImmContent) -> Bool {
         var payloads: [[UInt8]] = []
+        let maxP = link.rectMax                       // 设备给的 max_payload 变小时条带跟着变窄
         for w in ws {
             let b = c.blocks[w.block]
             page.immDrawBlock(c, w.block, cls: w.cls, top: 0)
             var buf = [UInt16](repeating: 0, count: screenW * b.h)
             toRGB565(page.cv.pixels, count: screenW * b.h, into: &buf)
             let local = (w.rows.lowerBound - b.y)..<(w.rows.upperBound - b.y)
-            for s in immStrips(rows: local, width: screenW) {
-                payloads.append(immRectPayload(y: b.y + s.lowerBound, x: 0, w: screenW, rows: s, visible: w.visible, buf, width: screenW))
-            }
+            payloads += immRectPayloads(y: b.y, rows: local, visible: w.visible, buf, width: screenW, maxPayload: maxP)
         }
         return payloads.isEmpty || link.send(LinkType.immRect, payloads)
     }

@@ -6,7 +6,7 @@ public enum LinkType {
     public static let hello: UInt8 = 0x01, seg: UInt8 = 0x10, rect: UInt8 = 0x20, present: UInt8 = 0x21, copy: UInt8 = 0x22
     public static let backlight: UInt8 = 0x30, fbcrc: UInt8 = 0x40, diag: UInt8 = 0x50, ping: UInt8 = 0x7F
     public static let led: UInt8 = 0x31
-    public static let helloAck: UInt8 = 0x81, ack: UInt8 = 0xFE
+    public static let helloAck: UInt8 = 0x81, diagR: UInt8 = 0xD0, ack: UInt8 = 0xFE
     /// 设备主动上报的按键事件（fw v8），seq = 0，主机不应答
     public static let key: UInt8 = 0x90
 }
@@ -86,6 +86,9 @@ public struct AckStats: Equatable {
     }
 }
 
+/// 这份实现认的 proto_ver（docs/protocol.md：以后不兼容的改动会升它）
+public let linkProtoVer = 0
+
 /// HELLO_ACK（0x81）
 public struct HelloInfo: Equatable {
     public var proto, fw, width, height, pixfmt, segBytes, caps, maxPayload: Int
@@ -93,11 +96,35 @@ public struct HelloInfo: Equatable {
     public var hasCopy: Bool { caps & 4 != 0 }
     public var hasKeys: Bool { caps & 0x10 != 0 }
     public var hasLed: Bool { caps & 0x20 != 0 }
+    public var protoSupported: Bool { proto == linkProtoVer }
+    /// 单条 RECT / IMM_RECT 的 payload 上限：设备给的 max_payload，但不超过本实现按 32 KiB 切的条带
+    public var rectPayloadMax: Int { min(maxPayload, linkMaxPayload) }
     public init?(_ p: [UInt8]) {
         guard p.count >= 16 else { return nil }
         proto = rd16(p, 0); fw = rd16(p, 2); width = rd16(p, 4); height = rd16(p, 6)
         pixfmt = Int(p[8]); segBytes = Int(p[9]); caps = rd16(p, 10); maxPayload = rd16(p, 12)
     }
+}
+
+/// PRESENT 的 ACK：status 要是 0（沉浸模式里回 1），出错计数（CRC / 长度 / 被拒）也没比基线多
+public func presentAckOK(_ a: AckStats, errBase: UInt32) -> Bool {
+    a.status == 0 && a.crcErr + a.lenErr + a.badParam == errBase
+}
+
+/// DIAG_R（u8 op, u8 status, …）：status 0 才算成功；不认识的 op、沉浸模式里的 DIAG 回 3
+public func diagReplyOK(_ r: [UInt8]?) -> Bool {
+    guard let r, r.count >= 2 else { return false }
+    return r[1] == 0
+}
+
+/// 宽 width 的 RGB565 图里一块矩形的 CRC-32（行优先、小端字节，同固件 FBCRC）
+public func fbRegionCRC(_ buf: [UInt16], x: Int, y: Int, w: Int, h: Int, width: Int = screenW) -> UInt32 {
+    var b: [UInt8] = []
+    b.reserveCapacity(w * h * 2)
+    for r in y..<(y + h) {
+        for k in (r * width + x)..<(r * width + x + w) { let v = buf[k]; b.append(UInt8(v & 0xFF)); b.append(UInt8(v >> 8)) }
+    }
+    return linkCRC32(b)
 }
 
 /// RGBA8888 → RGB565（R 在高位，R05 大屏的原生格式）

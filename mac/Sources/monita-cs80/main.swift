@@ -20,6 +20,7 @@
 //   /dev/xxx：串口（Linux / 有串口驱动时）
 //   像素换成 RGB565，脏 tile 合并成矩形 RECT + PRESENT；status/screensaver/heartbeat/layout/agents 轮询都不跑。
 //   --bench：只测链路（HELLO/PING/测试图/FBCRC/带宽/SEG 时钟）然后退出，见 Bench.swift
+//   --conformance：对着固件模拟器（tools/fwsim/run.sh）跑协议对照脚本，见 Conformance.swift
 //
 // 用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick 200]
 //                   [--png out.png [--lock] [--sample lyrics.json]] [--dry-run [--lock]]
@@ -43,6 +44,8 @@ setvbuf(stdout, nil, _IOLBF, 0)
 var hostURL = "http://127.0.0.1:8787"
 var deviceSpec: DeviceSpec?
 var bench = false
+/// --conformance：对着固件模拟器跑协议对照脚本（tools/fwsim/run.sh 用，见 Conformance.swift），不要对真设备用
+var conformance = false
 var scrollFlag = true
 var scrollSim = false
 /// fw v2：翻页不等帧事件（基址帧头锁存时不撕裂，滚动帧率翻倍；待肉眼确认），连上时用 DIAG 11 打开
@@ -72,6 +75,7 @@ do {
             guard let d = parseDeviceSpec(v) else { print("--device 写法：usb、usb:<接口号> 或串口路径（收到 \(v)）"); exit(2) }
             deviceSpec = d
         case "--bench": bench = true
+        case "--conformance": conformance = true
         case "--no-scroll": scrollFlag = false
         case "--scroll-sim": scrollSim = true
         case "--flip-now": flipNow = true
@@ -432,9 +436,9 @@ let link: DeviceLink? = deviceSpec.map { spec in
     case .usb(let n): return DeviceLink(name: n.map { "usb:\($0)" } ?? "usb") { openUsb(interface: n) }
     }
 }
-if bench {
-    guard let link else { print("--bench 要配 --device"); exit(2) }
-    exit(runBench(link) ? 0 : 1)
+if bench || conformance {
+    guard let link else { print("--bench / --conformance 要配 --device"); exit(2) }
+    exit((conformance ? runConformance(link) : runBench(link)) ? 0 : 1)
 }
 log("monita-cs80 启动：\(link.map { "device=\($0.name)" } ?? "host=\(hostURL)") tick=\(Int(tickMs))ms\(dryRun ? " (dry-run)" : "")")
 let forceLock = dryRun && pngLock   // --dry-run --lock：模拟锁屏
@@ -447,7 +451,7 @@ if let link {
     every(2.0, "link") {
         if link.connectIfNeeded() {
             if flipNow, link.info?.hasCopy == true {
-                log(link.request(LinkType.diag, [11, 1], replyType: 0xD0) != nil ? "翻页模式：立即写基址（--flip-now）" : "固件不认 DIAG 11")
+                log(link.setFlipNow() ? "翻页模式：立即写基址（--flip-now）" : "固件不认 DIAG 11（或正在沉浸模式里）")
             }
             shared.device = "up"; shared.requestFull()
         }

@@ -46,6 +46,13 @@ public func immStrips(rows: Range<Int>, width: Int, maxPayload: Int = linkMaxPay
     return stride(from: rows.lowerBound, to: rows.upperBound, by: n).map { $0..<min($0 + n, rows.upperBound) }
 }
 
+/// buf（宽 width）里第 rows 行整行宽写到逻辑行 y + 行号，按 maxPayload（设备的 max_payload，见 HelloInfo.rectPayloadMax）切成 IMM_RECT
+public func immRectPayloads(y: Int, rows: Range<Int>, visible: Bool, _ buf: [UInt16], width: Int, maxPayload: Int) -> [[UInt8]] {
+    immStrips(rows: rows, width: width, maxPayload: maxPayload).map {
+        immRectPayload(y: y + $0.lowerBound, x: 0, w: width, rows: $0, visible: visible, buf, width: width)
+    }
+}
+
 // MARK: 布局
 
 public struct ImmBlock: Equatable {

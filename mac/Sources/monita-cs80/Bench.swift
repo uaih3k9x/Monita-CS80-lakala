@@ -101,9 +101,9 @@ func runBench(_ link: DeviceLink) -> Bool {
         var fb = testPattern(2)
         guard link.push(fullRects(), fb, frameID: 200) else { check(false, "整帧失败"); return false }
         for mode: UInt8 in [0, 1] {
-            let m = link.request(LinkType.diag, [11, mode], replyType: 0xD0)
-            print("  翻页模式 \(mode)（\(mode == 0 ? "先等帧事件" : "立即写基址")）\(m == nil ? "：固件不认 DIAG 11，跳过" : "")")
-            if m == nil { continue }
+            let m = diagReplyOK(link.request(LinkType.diag, [11, mode], replyType: LinkType.diagR))
+            print("  翻页模式 \(mode)（\(mode == 0 ? "先等帧事件" : "立即写基址")）\(m ? "" : "：固件不认 DIAG 11，跳过")")
+            if !m { continue }
             t0 = Date()
             for i in 0..<60 {
                 let c = scrollCopy(region: region, dy: -8)!
@@ -117,7 +117,7 @@ func runBench(_ link: DeviceLink) -> Bool {
             let r = link.request(LinkType.fbcrc, [0, 0, 0, 0, 0x20, 0x03, 0x00, 0x05]).flatMap(AckStats.init)
             check(r?.extra == fbBytesCRC(fb), String(format: "FBCRC 一致；%.1f ms / 帧（%.1f fps）", per, 1000 / per))
         }
-        _ = link.request(LinkType.diag, [11, flipNow ? 1 : 0], replyType: 0xD0)
+        _ = link.request(LinkType.diag, [11, flipNow ? 1 : 0], replyType: LinkType.diagR)
     } else {
         print("== COPY：固件 caps=\(info.caps) 不支持（要 fw v2），跳过")
     }

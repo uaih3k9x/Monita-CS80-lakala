@@ -128,7 +128,7 @@ final class DeviceLink {
         guard let r = call(LinkType.hello, pl, replyType: LinkType.helloAck), let h = HelloInfo(r) else {
             drop("HELLO 没有应答"); return false
         }
-        guard h.width == screenW, h.height == screenH, h.pixfmt == 1 else { drop("屏参数不符 \(h)"); return false }
+        guard h.protoSupported, h.width == screenW, h.height == screenH, h.pixfmt == 1 else { drop("协议版本 / 屏参数不符 \(h)"); return false }
         info = h; errBase = 0; gen += 1
         log("设备已连上 \(name)：fw=\(h.fw) caps=\(h.caps)\(h.doubleBuffered ? "（双缓冲）" : "") max_payload=\(h.maxPayload)")
         return true
@@ -157,6 +157,17 @@ final class DeviceLink {
         return true
     }
 
+    /// 单条 RECT / IMM_RECT 的 payload 上限（没连上时按 32 KiB）
+    var rectMax: Int { lock.lock(); defer { lock.unlock() }; return info?.rectPayloadMax ?? linkMaxPayload }
+
+    /// caps 运行中会变（IMM_EXIT 的 ACK extra 是退出后的 caps）
+    func updateCaps(_ caps: Int) { lock.lock(); defer { lock.unlock() }; info?.caps = caps }
+
+    /// DIAG 11：翻页时机切到"立即写基址"。DIAG_R 的 status 不是 0（固件不认 / 沉浸模式里）返回 false
+    func setFlipNow() -> Bool {
+        diagReplyOK(request(LinkType.diag, [11, 1], replyType: LinkType.diagR, timeoutMs: 10_000))
+    }
+
     /// 这条 ACK 里的出错计数（CRC / 长度 / 被拒）比上一次多了吗；push 和沉浸模式共用一个基线
     func newErrors(_ a: AckStats) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -183,7 +194,7 @@ final class DeviceLink {
     func push(_ rects: [LinkRect], _ buf: [UInt16], copies: [LinkCopy] = [], frameID: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard let port, let info else { return false }
-        let maxP = min(info.maxPayload, linkMaxPayload)
+        let maxP = info.rectPayloadMax
         var rs: [LinkRect] = []
         for r in rects where 8 + r.w * r.h * 2 > maxP {   // 调用方给的矩形太大就按行切
             let rows = max(1, (maxP - 8) / (r.w * 2))
@@ -193,8 +204,7 @@ final class DeviceLink {
         let (bytes, s) = encodeBatch(rs, buf, copies: info.hasCopy ? copies : [], frameID: frameID, seq: &seq)
         guard port.write(bytes) else { drop("写失败"); return false }
         guard let r = wait(type: LinkType.ack, seq: s, timeoutMs: 10_000), let a = AckStats(r) else { drop("PRESENT 没有应答"); return false }
-        let errs = a.crcErr + a.lenErr + a.badParam
-        defer { errBase = errs }
-        return errs == errBase
+        defer { errBase = a.crcErr + a.lenErr + a.badParam }
+        return presentAckOK(a, errBase: errBase)       // 沉浸模式里 PRESENT 回 status 1
     }
 }
