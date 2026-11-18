@@ -97,5 +97,44 @@ class PixelTests(unittest.TestCase):
         self.assertEqual(fb[0], 0)
 
 
+class V9Tests(unittest.TestCase):
+    """fw v8 / v9 的 KEY / LED / IMM_* 编解码 (docs/protocol.md)"""
+
+    def test_constants_match_protocol(self):
+        self.assertEqual((ml.KEY, ml.LED, ml.IMM_ENTER, ml.IMM_EXIT, ml.IMM_RECT, ml.IMM_SCROLL),
+                         (0x90, 0x31, 0x60, 0x61, 0x62, 0x63))
+        self.assertEqual((ml.CAP_KEYS, ml.CAP_LED, ml.CAP_IMMERSIVE), (0x10, 0x20, 0x40))
+        self.assertEqual(ml.PROTO_VER, 0)
+
+    def test_parse_key(self):
+        k = ml.parse_key(bytes([3, 2, 0x34, 0x12]) + struct.pack("<I", 99))
+        self.assertEqual(k, dict(key=3, ev=2, n=0x1234, uptime=99))
+        self.assertIsNone(ml.parse_key(b"\x01"))
+
+    def test_led_payload(self):
+        self.assertEqual(ml.led_payload(ml.LED_G, ml.LED_BLINK, 500, 100, 3000), struct.pack("<BBHHH", 2, 2, 500, 100, 3000))
+        self.assertEqual(ml.led_payload(0, ml.LED_OFF), bytes(8))
+
+    def test_imm_payloads(self):
+        self.assertEqual(ml.imm_enter_payload(7), struct.pack("<I", 7))
+        self.assertEqual(ml.imm_scroll_payload(1300, 360), struct.pack("<IH", 1300, 360))
+        px = bytes(range(16))                                # 2 行 × 4 px
+        p = ml.imm_rect_payload(5000, 1, 4, 2, px, visible=True)
+        self.assertEqual(p[:12], struct.pack("<IHHHBB", 5000, 1, 4, 2, 1, 0))
+        self.assertEqual(p[12:], px)
+        with self.assertRaises(ValueError):
+            ml.imm_rect_payload(0, 0, 4, 2, px[:-1])
+
+    def test_imm_strips_respect_max_payload(self):
+        self.assertEqual(ml.imm_strips(0, 45), [(0, 20), (20, 20), (40, 5)])
+        self.assertTrue(all(12 + 800 * 2 * h <= 32768 for _, h in ml.imm_strips(0, 1280)))
+        small = ml.imm_strips(100, 30, max_payload=16384)
+        self.assertEqual(small, [(100, 10), (110, 10), (120, 10)])
+
+    def test_stat_names_unchanged(self):
+        # 键名是公开接口: uptime_ms 实际单位是 1.024 ms (ACK.uptime), 但不改名
+        self.assertEqual(ml.STAT_NAMES[7], "uptime_ms")
+
+
 if __name__ == "__main__":
     unittest.main()

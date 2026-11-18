@@ -1,29 +1,40 @@
-"""Monita link 协议 v0 的 Python 参考实现 (docs/protocol.md)。
+"""Monita link 协议 v0 的 Python 参考实现 (docs/protocol.md), 覆盖到 fw v9 (KEY / LED / 沉浸模式 IMM_*)。
 
-只用标准库; 打开串口要 pyserial (`pip install pyserial`)。纯逻辑 (编帧、拆帧、RGB565、tile 差分打包)
-不依赖 pyserial, 见 test_monita_link.py。
+只用标准库; 打开串口优先用 pyserial (`pip install pyserial`), 没装时 POSIX 上退回 PosixPort (termios)。
+纯逻辑 (编帧、拆帧、RGB565、tile 差分打包、IMM 载荷) 不依赖串口, 见 test_monita_link.py。
+不用设备测上位机: tools/fwsim/ (固件模拟器, 开一个伪终端当串口)。
 """
 import struct
 import time
+import warnings
 import zlib
 
 SYNC = b"\xA5\x5A"
+PROTO_VER = 0
 HELLO, SEG, RECT, PRESENT, BACKLIGHT, FBCRC, DIAG, PING = 0x01, 0x10, 0x20, 0x21, 0x30, 0x40, 0x50, 0x7F
 COPY = 0x22
-HELLO_ACK, DIAG_R, ACK = 0x81, 0xD0, 0xFE
+LED = 0x31                                      # fw v8
+IMM_ENTER, IMM_EXIT, IMM_RECT, IMM_SCROLL = 0x60, 0x61, 0x62, 0x63   # fw v9
+HELLO_ACK, KEY, DIAG_R, ACK = 0x81, 0x90, 0xD0, 0xFE
 OK, EPARAM, EUNSUP = 0, 1, 3
 W, H = 800, 1280
 TILE_W, TILE_H = 32, 16
 CAP_FBCRC, CAP_DOUBLEBUF, CAP_COPY, CAP_TRIBUF = 0x0001, 0x0002, 0x0004, 0x0008
+CAP_KEYS, CAP_LED, CAP_IMMERSIVE = 0x0010, 0x0020, 0x0040
+KEY_DOWN, KEY_UP, KEY_LONG = 1, 2, 3
+LED_R, LED_G, LED_B = 1, 2, 4
+LED_OFF, LED_ON, LED_BLINK = 0, 1, 2
+IMM_VISIBLE = 0x01                              # IMM_RECT flags bit0: 允许写屏上的行
 # DIAG (0x50) 子命令: 只给诊断用, 不属于稳定协议 (fw/link/diag.h)
 DG_MEMQ, DG_MAXBLK, DG_BUFS, DG_SCAN, DG_PEEK, DG_FILL, DG_FLIP, DG_EVT, DG_PHASE, DG_DBUF = 0, 1, 2, 3, 4, 5, 6, 7, 9, 10
-DG_FLIPMODE = 11                                # fw v4: 翻页时机 (26..30 曾是 DMA 研究, 已移除)
+DG_FLIPMODE = 11                                # fw v2: 翻页时机, v4 起默认 1 = 立即 (26..30 曾是 DMA 研究, 已移除)
 DG_TRI, DG_NBUF = 31, 32                        # fw v6: 多缓冲状态 / 切块数
 TRI_FIELDS = ("n", "nbuf", "note", "s", "p", "d", "gver", "waits", "xcopies", "syncs", "full_syncs", "buf0", "buf1", "buf2", "flip_wait_us")
 # 零拷贝滚动实验 (fw v3, fw/link/zc_diag.h)
 DG_ZC_ARM, DG_ZC_PEEK, DG_ZC_POKE, DG_ZC_LINE, DG_ZC_RULER, DG_ZC_SPLIT = 20, 21, 22, 23, 24, 25
 LINE_US = 26600 / 1310          # 每行时长 (面板 vtotal 1310 行, 帧周期 26.6 ms)
 VBLANK_LINES = 3 + 11           # vsync + vbp: 0x04 事件之后多少行才到有效区第 0 行 (推测 0x04 = vsync 起点)
+# ACK 的 9 个 u32。注意 "uptime_ms" 实际单位是 1.024 ms (固件 osiUpTimeUS >> 10); 键名是公开接口, 不改
 STAT_NAMES = ("rx_bytes", "frames", "crc_err", "len_err", "rects", "presents", "bad_param", "uptime_ms", "extra")
 
 
@@ -85,6 +96,19 @@ def parse_hello_ack(p):
     return dict(proto=ver, fw=fw, w=w, h=h, pixfmt=fmt, seg_bytes=seg, caps=caps, max_payload=maxp)
 
 
+def parse_key(p):
+    """KEY (0x90, 设备主动发, seq = 0): u8 key, u8 ev, u16 n, u32 uptime (1.024 ms 单位)。长度不对返回 None"""
+    if len(p) < 8:
+        return None
+    key, ev, n, up = struct.unpack_from("<BBHI", p)
+    return dict(key=key, ev=ev, n=n, uptime=up)
+
+
+def led_payload(mask, mode, period_ms=0, on_ms=0, duration_ms=0):
+    """LED (0x31, fw v8): mode 0 灭 / 1 常亮 / 2 闪烁; period 0 = 1000, on 0 = 一半, duration 0 = 一直 (mode 0 时忽略)"""
+    return struct.pack("<BBHHH", mask, mode, period_ms, on_ms, duration_ms)
+
+
 # ---- 像素 ----
 
 def rgb888_to_rgb565(rgb):
@@ -140,14 +164,59 @@ def full_rects(width=W, height=H, max_payload=32768):
 
 # ---- 串口 ----
 
-class Link:
-    def __init__(self, port, timeout=2.0):
+class PosixPort:
+    """没有 pyserial 时的串口 (Linux / macOS 的 tty、fwsim 的伪终端): 只实现 Link 用到的那几个方法"""
+
+    def __init__(self, path, read_timeout=0.05):
+        import os
+        import termios
+        import tty
+        self._os, self._termios = os, termios
+        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+        tty.setraw(self.fd)
+        self.read_timeout = read_timeout
+
+    @property
+    def in_waiting(self):
+        import fcntl
+        b = fcntl.ioctl(self.fd, self._termios.FIONREAD, b"\0\0\0\0")
+        return struct.unpack("i", b)[0]
+
+    def read(self, n):
+        import select
+        r, _, _ = select.select([self.fd], [], [], self.read_timeout)
+        return self._os.read(self.fd, max(1, n)) if r else b""
+
+    def write(self, data):
+        mv = memoryview(bytes(data))
+        while mv:
+            mv = mv[self._os.write(self.fd, mv):]
+
+    def reset_input_buffer(self):
+        self._termios.tcflush(self.fd, self._termios.TCIFLUSH)
+
+    def close(self):
+        self._os.close(self.fd)
+
+
+def open_port(port):
+    try:
         import serial  # pyserial
-        self.ser = serial.Serial(port, 115200, timeout=0.05, write_timeout=30)
+    except ImportError:
+        return PosixPort(port)
+    return serial.Serial(port, 115200, timeout=0.05, write_timeout=30)
+
+
+class Link:
+    """port: 串口名 (COMx / /dev/tty*), 或者已经打开的对象 (要有 read / write / in_waiting / reset_input_buffer / close)"""
+
+    def __init__(self, port, timeout=2.0):
+        self.ser = open_port(port) if isinstance(port, str) else port
         self.timeout = timeout
         self.seq = 0
         self.parser = Parser()
         self.info = None
+        self.keys = []                  # 收到的 KEY (parse_key 的 dict), 调用方自己取走
         self.ser.reset_input_buffer()
 
     def close(self):
@@ -158,13 +227,35 @@ class Link:
         self.ser.write(encode(ftype, self.seq, payload))
         return self.seq
 
+    def _frames(self):
+        """读一次串口, 拆出的帧里 KEY 收进 self.keys, 其余返回"""
+        out = []
+        for t, s, p in self.parser.feed(self.ser.read(self.ser.in_waiting or 1)):
+            if t == KEY:
+                k = parse_key(p)
+                if k:
+                    self.keys.append(k)
+            else:
+                out.append((t, s, p))
+        return out
+
     def wait(self, want_type, seq, timeout=None):
         end = time.monotonic() + (timeout or self.timeout)
         while time.monotonic() < end:
-            for t, s, p in self.parser.feed(self.ser.read(self.ser.in_waiting or 1)):
+            for t, s, p in self._frames():
                 if t == want_type and s == seq:
                     return p
         raise TimeoutError("no reply type %#x seq %d" % (want_type, seq))
+
+    def poll_keys(self, timeout=0.0):
+        """不等应答, 只收 KEY: 等到有事件或超时, 返回并清空 self.keys"""
+        end = time.monotonic() + timeout
+        while True:
+            self._frames()
+            if self.keys or time.monotonic() >= end:
+                break
+        ks, self.keys = self.keys, []
+        return ks
 
     def call(self, ftype, payload=b"", timeout=None):
         """发一条需要应答的命令, 返回 ACK dict"""
@@ -176,6 +267,8 @@ class Link:
             tz = -time.altzone if time.localtime().tm_isdst > 0 else -time.timezone
             pl = struct.pack("<Ih", int(time.time()), tz // 60)
         self.info = parse_hello_ack(self.wait(HELLO_ACK, self.send(HELLO, pl)))
+        if self.info["proto"] != PROTO_VER:
+            warnings.warn("设备 proto_ver = %d, 这份参考实现只认 %d" % (self.info["proto"], PROTO_VER))
         return self.info
 
     def ping(self):
@@ -196,6 +289,39 @@ class Link:
         p = self.wait(DIAG_R, self.send(DIAG, bytes([op]) + args), timeout)
         n = struct.unpack_from("<H", p, 2)[0]
         return p[1], list(struct.unpack_from("<%dI" % n, p, 4))
+
+    def led(self, mask, mode, period_ms=0, on_ms=0, duration_ms=0):
+        return self.call(LED, led_payload(mask, mode, period_ms, on_ms, duration_ms))
+
+    # ---- 沉浸模式 (fw v9, caps bit6) ----
+
+    def max_rect_payload(self):
+        return min(self.info["max_payload"] if self.info else 32768, 32768)
+
+    def imm_enter(self, y0=0):
+        """返回 ACK; status 0 时 extra = 卷轴行数 R, 3 = 设备拿不到够大的卷轴 (留在普通页面)"""
+        return self.call(IMM_ENTER, imm_enter_payload(y0))
+
+    def imm_exit(self):
+        """返回 ACK; extra = 退出后的 caps (多缓冲可能拿不全), 同步进 self.info"""
+        a = self.call(IMM_EXIT)
+        if self.info is not None and a["status"] == OK:
+            self.info["caps"] = a["extra"]
+        return a
+
+    def imm_write(self, y, rows, x=0, w=W, visible=False):
+        """把 rows (h 行 × w 像素的 RGB565 字节) 写到逻辑行 y 起, 按 max_payload 切条带, 不等应答 (同 RECT)。
+        下一条 IMM_SCROLL / PING 的 ACK 是同步点, 看它的 bad_param"""
+        h = len(rows) // (w * 2)
+        out = bytearray()
+        for y0, n in imm_strips(0, h, w, self.max_rect_payload()):
+            self.seq = (self.seq + 1) & 0xFF
+            out += encode(IMM_RECT, self.seq, imm_rect_payload(y + y0, x, w, n, rows[y0 * w * 2:(y0 + n) * w * 2], visible))
+        self.ser.write(out)
+
+    def imm_scroll(self, y, dur_ms=0):
+        """窗口滚到顶 = y; 返回 ACK (extra = 正在扫描的窗口顶)"""
+        return self.call(IMM_SCROLL, imm_scroll_payload(y, dur_ms))
 
     def push(self, fb, rects, frame_id=0, copies=()):
         """把 fb (整帧 RGB565 字节) 里这些矩形发出去, 再 PRESENT; 返回 PRESENT 的 ACK。
@@ -231,6 +357,29 @@ def scroll_copy(x, y, w, h, dy):
     if dy == 0 or abs(dy) >= h:
         return None
     return (x, y - dy, w, h + dy, x, y) if dy < 0 else (x, y, w, h - dy, x, y + dy)
+
+
+# ---- 沉浸模式 (IMM_*, fw v9) 载荷 ----
+
+def imm_enter_payload(y0=0):
+    return struct.pack("<I", y0 & 0xFFFFFFFF)
+
+
+def imm_scroll_payload(y, dur_ms=0):
+    return struct.pack("<IH", y & 0xFFFFFFFF, max(0, min(dur_ms, 0xFFFF)))
+
+
+def imm_rect_payload(y, x, w, h, pixels, visible=False):
+    """IMM_RECT: u32 y, u16 x, w, h, u8 flags, u8 0 + w*h 个 RGB565 (行优先)"""
+    if len(pixels) != w * h * 2:
+        raise ValueError("IMM_RECT 像素长度 %d != %d" % (len(pixels), w * h * 2))
+    return struct.pack("<IHHHBB", y & 0xFFFFFFFF, x, w, h, IMM_VISIBLE if visible else 0, 0) + bytes(pixels)
+
+
+def imm_strips(y, h, width=W, max_payload=32768):
+    """行 [y, y+h) 切成单条 IMM_RECT 放得下的条带 [(y, 行数)] (整行宽 800 / 32 KiB 时 20 行一条)"""
+    n = max(1, (min(max_payload, 32768) - 12) // (width * 2))
+    return [(r, min(n, y + h - r)) for r in range(y, y + h, n)]
 
 
 # ---- 零拷贝滚动实验 (DIAG 20..25) 的参数打包/解码 ----
