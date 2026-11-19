@@ -18,10 +18,17 @@
     未连接蓝灯 2 s 亮 1 s 灭，HELLO 后交给主机 LED（0x31），HELLO 之后 15 s 没字节回到心跳。`caps` bit4 KEYS / bit5 LED。
     Mac 侧（`mac/Sources/monita-cs80/Controls.swift`，纯逻辑 `MonitaCore/Controls.swift`）：+/− 系统音量、查询 播放/暂停、≡ 切 歌词页 ↔ 时钟页；
     播放中绿灯常亮，退出时灭灯；`--no-keys` / `--no-led`。会话"等人"蓝灯闪的逻辑已写好，但直连模式下还没有会话数据源（见"顺带要做的"）。
+  - **主机走了回开机画面 + 休眠（fw v10，只编译、待上机）**：HELLO 之后 5 s 没有有效帧（或 USB 拔掉：`ql_usb_bind_hotplug_cb`，只在 VBUS 也断了时有）
+    = 主机走了：大屏重画开机版权页（Link 行 WAIT）、段码屏回本地时钟、蓝灯心跳；下一条 HELLO 照旧接管。新消息 SLEEP（0x32，`caps` bit7）：
+    关背光（GPIO7）、段码屏 EN（GPIO10）拉低、灭灯；没主机满 10 min 自动休眠；任何一帧叫醒，按键也能叫醒。纯逻辑 `fw/link/linkwd.h`。
+    Mac 侧：`willSleep` / `screensDidSleep` 发 SLEEP 并停发，`didWake` / `screensDidWake` 重新 HELLO + 整帧；隔了 ≥ 3.5 s 才发时先重新 HELLO
+    （`MonitaCore/HostPower.swift`）。查询键长按不再切沉浸模式（误触），沉浸模式只能 `--immersive` 进。
+    同版修了 Mac 解锁后 31 s 才切回歌词：渲染线程在锁屏页同步读 `~/Downloads` 里的壁纸，触发 TCC 授权弹窗、锁着屏没人点，
+    渲染线程一直卡到解锁后点了"允许"；壁纸改成后台刷新。协议见 [protocol.md「主机走了 / 休眠」](docs/protocol.md)。
   - **沉浸模式（fw v9，只编译、待上机）**：整屏歌词，滚动 = 改扫描基址（零拷贝）。IMM_ENTER 把第二、三块 fb 还给堆，
     按实际能拿到的最大块分配"卷轴"（典型 ≈ 2700 行 / 4.3 MB，不到 1536 行就拒绝、原样恢复多缓冲）；固件里做 ease-out 缓动，每帧最多写一次基址；
     走到卷轴末尾时停稳后自动"换底"（直接搬或绕道原厂 fb，屏上内容不变）。纯逻辑 `fw/link/imm.h`，主机单测随机序列逐帧对照参考模型。
-    Mac 侧 `--immersive` / 查询键长按切换，`MonitaCore/Immersive.swift` 做块布局和切句规划（只写新露出来的块和变了档的块），预览 `docs/img/immersive.png`。
+    Mac 侧 `--immersive`（v9 时查询键长按也能切，v10 去掉了），`MonitaCore/Immersive.swift` 做块布局和切句规划（只写新露出来的块和变了档的块），预览 `docs/img/immersive.png`。
     协议见 [protocol.md「沉浸模式」](docs/protocol.md)。同版还修了：主机不经 HELLO 回来时恢复 KEY / 灯（`link/linkwd.h`）、PWRKEY 慢采样丢轻点。
   - **开机版权页（fw v7，待上机）**：`fw/lcd/bootscreen.h` 画在前台缓冲，EDK2 UEFI 8×19 字体 2 倍放大（`tools/gen_font.py` 生成 `font_uefi.h`）；
     动态行：版本、构建日期、堆剩余、缓冲块数（三缓冲 x3 OK / 降级 WARN）、段码屏 GPIO 初始化；Link 行 WAIT，第一条 HELLO 改 OK。
@@ -63,7 +70,7 @@ Agent 会话数（直连模式下暂时没有，见下"顺带要做的"）。
 - 锁屏留言的名字是配置项：`--name` 或 `MONITA_AWAY_NAME`，默认"主人"。
 - 推帧：Swift 直接开 USB 口，走 [docs/protocol.md](docs/protocol.md) 的 TILES/PRESENT。tile 差分、帧键省电、锁屏降频这套逻辑不变，只换传输层。
 - 防撕裂：固件"追光"写入——等扫描线扫过一个条带再写这个条带，一批 tile 落在同一次刷新里（背景见 [r05-notes.md §4](docs/r05-notes.md)）。
-- 断开时：大屏保持最后一帧（以后可以画一个"未连接 + 时钟"的本地画面）。
+- 断开时（fw v10）：5 s 没帧回开机版权页（段码屏本地时钟、蓝灯心跳）；Mac 睡眠 / 关显示器时设备休眠（背光、段码屏、灯全关），没主机满 10 min 也自动休眠。
 
 ### 段码屏（展示用）
 
@@ -80,9 +87,9 @@ Agent 会话数（直连模式下暂时没有，见下"顺带要做的"）。
 ### 按键与状态灯（fw v8）
 
 - `+` / `−`：Mac 音量（按下即生效）。
-- 查询（左上，PWRKEY）短按：播放 / 暂停；长按：进 / 出沉浸模式（fw v9）。
+- 查询（左上，PWRKEY）短按：播放 / 暂停；长按：不做事（fw v9 时是进 / 出沉浸模式，容易误触，Mac 侧 v10 去掉了）。
 - ≡（左下）短按：歌词页 ↔ 时钟页（时钟页 = 大号 HH:mm + 日期 + Front Panel）。
-- 状态灯：播放中绿灯常亮，暂停 / 没在放熄灭；有 Claude 会话在等人时蓝灯闪（等本地会话扫描做好后接上）；没连上 Mac 时固件自己蓝灯心跳。
+- 状态灯：播放中绿灯常亮，暂停 / 没在放熄灭；有 Claude 会话在等人时蓝灯闪（等本地会话扫描做好后接上）；没连上 Mac 时固件自己蓝灯心跳；休眠时灭。
 - 不做调光 / 呼吸（只有 GPIO，软件 PWM 实测效果差）。
 - 引脚和坑见 [r05-notes.md §7](docs/r05-notes.md)。
 
@@ -107,7 +114,7 @@ Agent 会话数（直连模式下暂时没有，见下"顺带要做的"）。
 - **Agent 会话数**：现在读旧 host 的 `/api/data/agents`。第 2 步之后换成 Swift 本地扫 Claude 会话目录：
   默认 `$CLAUDE_CONFIG_DIR/projects`（没设就是 `~/.claude/projects`），再加一个用户可配置的额外 glob 列表（多账号时用），
   按 jsonl 的最后一条判断 running/waiting。
-- 固件：任务里喂狗/看门狗策略、USB 断开重连。
+- 固件：任务里喂狗/看门狗策略。
 - LaunchAgent 安装脚本（`mac/com.monita.cs80.plist.example` 是模板）。
 - **经 USB 自更新 app**：现在刷 app 必须把线换到 Windows 走下载模式（macOS 认不出下载态）。
   想法：主机把新 app 分块推给正在跑的固件，固件校验整包 CRC 后写进 app 槽再重启。
@@ -139,3 +146,6 @@ Agent 会话数（直连模式下暂时没有，见下"顺带要做的"）。
 - 只装了 Command Line Tools 的 Mac 上 `swift test` 会静默跑 0 个用例，用 `swift run monita-cs80-tests`。
 - **PWRKEY 长按之后收不到抬起回调**（实机）：别指望 release 回调，固件靠超时补 UP。注册 `ql_pwrkey_callback_register` 后长按 3 s 不关机。
 - **GPIO13 上没有灯**，红灯在 GPIO29（原厂代码两根一起拉，容易看错）。按键去抖别超过 20 ms，30 ms 会吞掉轻点。
+- **Mac 上 LaunchAgent 读 `~/Downloads` / `~/Documents` 等会弹 TCC 授权**，弹窗出来之前调用的线程一直卡着（锁屏时没人点就卡几个小时）。
+  渲染线程上不许碰用户文件（壁纸在后台队列读）。ad-hoc 签名的二进制每次重编译 cdhash 都变，授权可能要重新点一次。
+- **fw v10 起 5 s 没有有效帧固件就回开机画面**：新上位机连着时至少每 2 s 发一帧，停发超过 3.5 s 再发时先重新 HELLO + 整帧。

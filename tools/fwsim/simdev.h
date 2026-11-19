@@ -4,7 +4,8 @@
  *   - 3 块 800×1280 RGB565 帧缓冲 (同实机: 原厂 fb + 开机 malloc 的第二、三块), 扫描基址是一个指针;
  *   - 帧事件"立即发生": 写完基址马上算锁存 (理想硬件, 等帧不花时间);
  *   - 卷轴按 sim_roll_rows 分配 (实机按堆里能拿到的, 典型 ≈ 2700 行);
- *   - 按键电平 / PWRKEY 计数由 sim_key_* 注入; 灯、背光只记下来给测试看;
+ *   - 按键电平 / PWRKEY 计数由 sim_key_* 注入, USB 拔掉 (hotplug 回调) 由 sim_usb_unplug 注入; 灯、背光、段码屏 EN 只记下来给测试看;
+ *   - 开机版权页是真固件代码 (fw/lcd/bootscreen.h) 画进屏上那块缓冲 (日期固定), 主机走了重画时屏上 CRC 应回到 sim_boot_crc;
  *   - 段码屏本地时钟是真固件代码 (fw/fg00/segclock.h + fgbuf.h + segmap.h), 只是 fg_flush 不刷 I2C, 显存 fg_fb 给测试看;
  *   - DIAG: 31 / 32 / 11 和"先收拢多缓冲"的分流走 dispatch.h, 具体的旧 op (diag.h, 碰寄存器) 换成桩:
  *     认识的 op 回 status 0、不带数据, 不认识的回 3 (同实机)。
@@ -26,8 +27,9 @@
 #include "linkwd.h"
 #include "../../fw/fg00/fgbuf.h"
 #include "../../fw/fg00/segmap.h"
+#include "../../fw/lcd/bootscreen.h"
 
-#define FW_VER        0x0009u          /* 跟 fw/app.c 的 FW_VER (tools/fwsim/run.sh 会对一遍) */
+#define FW_VER        0x000Au          /* 跟 fw/app.c 的 FW_VER (tools/fwsim/run.sh 会对一遍) */
 #define LCD_W         800u
 #define LCD_H         1280u
 #define FB_SIZE       (LCD_W * LCD_H * 2u)
@@ -57,7 +59,7 @@ static uint32_t now_ms(void){ return (uint32_t)(osiUpTimeUS() >> 10); }   /* 1.0
 
 /* ---- 给测试看的记录 ---- */
 static struct {
-    uint32_t collapse, uncollapse, seg_writes, backlight, bl_writes;
+    uint32_t collapse, uncollapse, seg_writes, backlight, bl_writes, seg_en, boot_draws;
     uint8_t  led_mask;
     uint32_t base_writes;
 } sim;
@@ -109,10 +111,16 @@ static void diag_reply(uint8_t op, uint8_t status, const uint32_t *w, uint32_t n
 static void fg_flush(void){ sim.seg_writes++; }
 #include "../../fw/fg00/segclock.h"
 
-/* ---- 背光 / 灯 / 开机页: 只记账 ---- */
+/* ---- 背光 / 灯 / 段码屏 EN: 只记账; 开机页 Link 行 OK 只改标记 (屏上像素不动) ---- */
 static void boot_link_ok(void){ g_boot_live = 0; }
 static void lcd_backlight(uint32_t on){ sim.backlight = on ? 1u : 0u; sim.bl_writes++; }
 static void led_poll(void){ if (g_led_ok) sim.led_mask = led_step(&g_led, now_ms()); }
+static void panel_power(uint32_t on){ lcd_backlight(on); sim.seg_en = on ? 1u : 0u; }   /* 同 app.c: 背光 + 段码屏 EN */
+
+/* ---- USB 拔掉 (实机: ql_usb_bind_hotplug_cb 回调里计数) ---- */
+static uint32_t sim_unplug_n, sim_unplug_seen;
+static void sim_usb_unplug(void){ sim_unplug_n++; }
+static int  usb_unplugged(void){ if (sim_unplug_seen == sim_unplug_n) return 0; sim_unplug_seen = sim_unplug_n; return 1; }
 
 /* ---- 按键注入: 键 2..4 是电平, 键 1 (PWRKEY) 是按下 / 抬起回调计数 (同实机) ---- */
 static uint8_t  sim_key_level;
@@ -287,16 +295,36 @@ static void imm_make_room(void){
     if (im_can_rebase(&g_im)) im_rebase(&g_im, &g_imio);
 }
 
+/* ---- 开机版权页 (真固件画图代码, 画在屏上那块; 同 app.c boot_draw) ---- */
+static uint32_t sim_boot_crc;                          /* 开机时画的那一屏 */
+static void sim_boot_draw(void){
+    bs_info_t in = { FW_VER, "2026-01-01", 0xFFFFFFFFu, g_tb.n, 1, 0 };
+    tb_poll();
+    bs_draw((uint16_t *)tb_addr(g_tb.s), &in);
+    tb_reset_to(&g_tb, g_tb.s);
+    g_boot_live = 1; sim.boot_draws++;
+}
+/* 主机走了 (同 app.c): 退出沉浸模式, 没提交的改动作废, 画到正在扫描的那块上 */
+static void boot_redraw(void){
+    if (!g_lcd_ok) return;
+    imm_exit();
+    if (g_tb.n > 1 && g_tb.d >= 0){ g_tb.ver[g_tb.d] = 0; g_tb.d = -1; g_tb.y0 = LCD_H; g_tb.y1 = 0; }
+    sim_boot_draw();
+}
+
 #include "dispatch.h"
+
+/* 屏上那一帧 (扫描基址起 1280 行) 的 CRC-32, 主机可以拿它对照自己画的 */
+static uint32_t sim_screen_crc(void){ return lk_crc32((const uint8_t *)sim_scan, FB_SIZE); }
 
 /* ---- 主循环 (同 app.c task_entry, 去掉看门狗 / cache) ---- */
 static uint32_t sim_last_rx;
 static void sim_init(void){
-    g_boot_live = 1;
     dbuf_init();
-    if (g_lcd_ok){ lcd_backlight(1); seg_draw_local(); }   /* 同 app.c: 开机亮背光, 段码屏 "------" (还没有时间) */
+    if (g_lcd_ok){ sim_boot_draw(); sim_boot_crc = sim_screen_crc(); lcd_backlight(1); seg_draw_local(); }   /* 同 app.c: 开机页、亮背光, 段码屏 "------" */
+    sim.seg_en = 1;
     led_init(&g_led); led_default(); led_poll();
-    keys_init(&g_keys); pwr_init(&g_pwr); lw_init(&g_lw);
+    keys_init(&g_keys); pwr_init(&g_pwr); lw_init(&g_lw, now_ms());
     lk_init(&g_p, g_pl, sim_max_payload > SIM_PL_CAP ? SIM_PL_CAP : sim_max_payload);
     sim_last_rx = now_us();
 }
@@ -318,7 +346,5 @@ static void sim_tick(void){
     imm_poll();
 }
 
-/* 屏上那一帧 (扫描基址起 1280 行) 的 CRC-32, 主机可以拿它对照自己画的 */
-static uint32_t sim_screen_crc(void){ return lk_crc32((const uint8_t *)sim_scan, FB_SIZE); }
 
 #endif

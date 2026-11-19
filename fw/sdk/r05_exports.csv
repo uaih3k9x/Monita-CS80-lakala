@@ -161,7 +161,7 @@ hash,name
 2f8f14f3,
 2fa98834,ql_rtos_task_suspend
 2fd5daf2,
-2fe4cc79,
+2fe4cc79,ql_usb_get_hotplug_state
 2fff12bc,ql_rtos_timer_create
 30440c8f,
 304e4638,ql_set_volume_ex

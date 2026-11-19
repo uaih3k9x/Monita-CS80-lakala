@@ -26,6 +26,7 @@
 #define LK_PRESENT   0x21u   /* u16 frame_id */
 #define LK_BACKLIGHT 0x30u   /* u8 on */
 #define LK_LED       0x31u   /* u8 mask, u8 mode, u16 period_ms, u16 on_ms, u16 duration_ms (fw v8, link/led.h) */
+#define LK_SLEEP     0x32u   /* 空 -> ACK, 然后关背光 / 段码屏 / 灯; 之后任何一帧叫醒 (fw v10, link/linkwd.h) */
 #define LK_COPY      0x22u   /* u16 sx,sy,w,h,dx,dy: 画布内搬矩形 (允许重叠), 不应答 */
 #define LK_FBCRC     0x40u   /* u16 x,y,w,h -> ACK 带 crc32 */
 #define LK_PING      0x7Fu
@@ -54,6 +55,7 @@
 #define LK_CAP_KEYS      0x0010u   /* 按键上报 KEY (0x90), fw v8 */
 #define LK_CAP_LED       0x0020u   /* 状态灯 LED (0x31), fw v8 */
 #define LK_CAP_IMMERSIVE 0x0040u   /* 沉浸模式 IMM_* (0x60..0x63), fw v9 */
+#define LK_CAP_SLEEP     0x0080u   /* 休眠 SLEEP (0x32) + 主机走了回开机画面, fw v10 */
 #define LK_PIXFMT_RGB565 1u
 
 /* ---- CRC-32/IEEE (反射, 多项式 0xEDB88320, 初值/终值异或 0xFFFFFFFF) ----

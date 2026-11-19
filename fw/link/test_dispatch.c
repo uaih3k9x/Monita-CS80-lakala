@@ -38,7 +38,8 @@ static void test_hello(void){
     CHECK(next_reply() && rx_type == LK_HELLO_ACK && rx_seq == seq && rx_len == 16);
     CHECK(lk_rd16(rx_pl + 0) == LK_PROTO_VER && lk_rd16(rx_pl + 2) == FW_VER);
     CHECK(lk_rd16(rx_pl + 4) == 800 && lk_rd16(rx_pl + 6) == 1280 && rx_pl[8] == 1 && rx_pl[9] == 72);
-    CHECK(lk_rd16(rx_pl + 10) == 0x7F && lk_rd16(rx_pl + 12) == 32768);
+    CHECK(FW_VER == 10);
+    CHECK(lk_rd16(rx_pl + 10) == 0xFF && lk_rd16(rx_pl + 12) == 32768);       /* bit7 SLEEP (fw v10) */
     CHECK(!next_reply());
 }
 
@@ -76,6 +77,10 @@ static int clock_shows(const char *hms){                /* "hhmmss" */
     for (int i = 0; i < 6; i++) if (digit_at(FG_COL_MAIN(i)) != SEG_DASH) return 0;
     return (fg_fb[FG_SEG_CLK_COLON_A >> 8] & (FG_SEG_CLK_COLON_A & 0xFF)) && (fg_fb[FG_SEG_CLK_COLON_B >> 8] & (FG_SEG_CLK_COLON_B & 0xFF));
 }
+static int clock_shows_dashes(void){                    /* 主区 "------" (本地画面) */
+    for (int i = 0; i < 6; i++) if (digit_at(FG_COL_MAIN(i)) != SEG_DASH) return 0;
+    return 1;
+}
 static void tick_s(uint32_t s){ for (uint32_t i = 0; i < 10 * s; i++){ sim_t_us += 100000u; sim_tick(); } }
 
 /* HELLO 带时间: 设备时钟 = 当地时间 (unix + tz), 段码屏小时钟跟着走; 灯灭、KEY 计数清零 */
@@ -103,12 +108,12 @@ static void test_hello_clock(void){
     CHECK(next_reply() && clk_valid && clk_sod == 0);
 }
 
-/* 主机走了 (15 s 没字节) -> 蓝灯心跳; 又来字节 (没 HELLO) -> 恢复主机设的灯; 沉浸模式里来 HELLO -> 退回普通模式 */
+/* 主机走了 (5 s 没有效帧) -> 蓝灯心跳; 又来字节 (没 HELLO) -> 恢复主机设的灯; 沉浸模式里来 HELLO -> 退回普通模式 */
 static void test_link_lost_and_rehello(void){
     const uint8_t green[8] = { LED_G, LED_MODE_ON, 0, 0, 0, 0, 0, 0 };
     send(LK_LED, green, 8);
     CHECK(next_reply() && rx_pl[1] == LK_OK && g_led.mode == LED_MODE_ON && sim.led_mask == LED_G);
-    tick_s(16);
+    tick_s(6);
     CHECK(!g_lw.up && g_led.mode == LED_MODE_BLINK && g_led.mask == LED_B);
     send(LK_PING, 0, 0);
     CHECK(next_reply() && g_lw.up && g_led.mode == LED_MODE_ON && g_led.mask == LED_G && sim.led_mask == LED_G);
@@ -117,6 +122,112 @@ static void test_link_lost_and_rehello(void){
     CHECK(next_reply() && rx_pl[1] == LK_OK && g_imm);
     send(LK_HELLO, 0, 0);
     CHECK(next_reply() && rx_type == LK_HELLO_ACK && !g_imm && g_tb.n == 3);
+}
+
+
+static void ms_ticks(uint32_t ms){ for (uint32_t i = 0; i < ms / 10u; i++){ sim_t_us += 10240u; sim_tick(); } }   /* 10 个 1.024 ms 单位一拍 */
+
+/* 整帧推一屏 (单色), 开机画面就不在了 */
+static void push_solid(uint16_t c){
+    static uint8_t pl[8 + 800 * 20 * 2];
+    for (uint32_t y = 0; y < LCD_H; y += 20){
+        lk_wr16(pl, 0); lk_wr16(pl + 2, (uint16_t)y); lk_wr16(pl + 4, 800); lk_wr16(pl + 6, 20);
+        for (uint32_t i = 0; i < 800u * 20u; i++) lk_wr16(pl + 8 + 2 * i, c);
+        send(LK_RECT, pl, sizeof pl);
+    }
+    uint8_t fid[2] = { 1, 0 };
+    send(LK_PRESENT, fid, 2);
+    while (next_reply()) {}
+}
+
+/* v10: HELLO 之后 5 s 没有有效帧 = 主机走了 -> 大屏回开机版权页 (Link 行 WAIT)、段码屏回本地时钟、蓝灯心跳; 乱码不算帧 */
+static void test_lost_boot_screen(void){
+    send(LK_HELLO, 0, 0);
+    while (next_reply()) {}
+    uint8_t seg[72] = { 0xAA };
+    send(LK_SEG, seg, 72);
+    CHECK(next_reply() && rx_pl[1] == LK_OK && seg_host_seen);
+    push_solid(0x07E0);
+    CHECK(!g_boot_live && sim_screen_crc() != sim_boot_crc);
+    const uint8_t off = 0;
+    send(LK_BACKLIGHT, &off, 1);                                 /* 主机关过背光: 回开机画面时要重新打开 */
+    CHECK(next_reply() && sim.backlight == 0);
+    uint32_t draws = sim.boot_draws;
+    static const uint8_t junk[15] = { 0xA5, 0x00, 0x11, 0x22, 0x5A, 0xA5, 0x5A, 0x7F, 0, 0, 0, 1, 2, 3, 4 };   /* 乱码 + 一条 CRC 错的 PING */
+    for (int i = 0; i < 4; i++){ ms_ticks(1200); sim_rx(junk, sizeof junk); }   /* 4.8 s 里只有乱码 */
+    CHECK(g_lw.up);
+    ms_ticks(300);
+    CHECK(!g_lw.up);
+    CHECK(g_boot_live && sim.boot_draws == draws + 1);
+    CHECK(sim_screen_crc() == sim_boot_crc);                     /* 和开机时画的一样 (Link 行 WAIT) */
+    CHECK(!seg_host_seen && clock_shows_dashes());
+    CHECK(g_led.mode == LED_MODE_BLINK && g_led.mask == LED_B && g_led.on == 2000u);
+    CHECK(sim.backlight == 1 && !g_lw.asleep);
+    send(LK_HELLO, 0, 0);                                        /* 主机重连: Link 行 OK, 之后推整帧 */
+    CHECK(next_reply() && rx_type == LK_HELLO_ACK && !g_boot_live && g_lw.up);
+}
+
+/* 沉浸模式里主机走了: 先退出沉浸模式 (还回多缓冲) 再画开机页 */
+static void test_lost_in_immersive(void){
+    uint8_t y0[4] = { 0, 0, 0, 0 };
+    send(LK_IMM_ENTER, y0, 4);
+    CHECK(next_reply() && rx_pl[1] == LK_OK && g_imm);
+    ms_ticks(5200);
+    CHECK(!g_lw.up && !g_imm && g_tb.n == 3 && g_boot_live && sim_screen_crc() == sim_boot_crc);
+    send(LK_HELLO, 0, 0);
+    while (next_reply()) {}
+}
+
+/* SLEEP (0x32): ACK 后关背光、段码屏 EN 低、灭灯, 本地时钟不再刷段码屏; 任何一帧叫醒并恢复主机设的灯 */
+static void test_host_sleep(void){
+    const uint8_t green[8] = { LED_G, LED_MODE_ON, 0, 0, 0, 0, 0, 0 };
+    send(LK_LED, green, 8);
+    CHECK(next_reply() && rx_pl[1] == LK_OK);
+    push_solid(0x001F);
+    uint32_t crc = sim_screen_crc();
+    send(LK_SLEEP, green, 1);                                    /* 带了载荷: 拒 */
+    CHECK(next_reply() && rx_type == LK_ACK && rx_pl[0] == LK_SLEEP && rx_pl[1] == LK_EPARAM && !g_lw.asleep);
+    send(LK_SLEEP, 0, 0);
+    CHECK(next_reply() && rx_type == LK_ACK && rx_pl[0] == LK_SLEEP && rx_pl[1] == LK_OK);
+    CHECK(g_lw.asleep && !g_lw.up);
+    CHECK(sim.backlight == 0 && sim.seg_en == 0 && sim.led_mask == 0);
+    uint32_t w0 = sim.seg_writes, draws = sim.boot_draws;
+    ms_ticks(20000);                                             /* 睡着: 不报 LOST、不画开机页、段码屏不刷 */
+    CHECK(sim.seg_writes == w0 && sim.boot_draws == draws && sim.backlight == 0 && sim.led_mask == 0);
+    send(LK_PING, 0, 0);
+    CHECK(next_reply() && rx_pl[0] == LK_PING && rx_pl[1] == LK_OK);
+    CHECK(!g_lw.asleep && g_lw.up && sim.backlight == 1 && sim.seg_en == 1);
+    CHECK(g_led.mode == LED_MODE_ON && g_led.mask == LED_G && sim.led_mask == LED_G);
+    CHECK(sim_screen_crc() == crc && !g_boot_live);              /* 睡之前的画面还在 */
+    CHECK(clock_shows_dashes() && sim.seg_writes > w0);         /* 段码屏重画 (本地) */
+}
+
+/* 主机走了满 10 min: 自动休眠; 按键叫醒 (开机页 + 蓝灯心跳), 不算主机回来; 来帧叫醒 */
+static void test_idle_sleep_and_key_wake(void){
+    ms_ticks(5200);
+    CHECK(!g_lw.up && !g_lw.asleep && sim.backlight == 1);
+    for (uint32_t i = 0; i < 600; i++) ms_ticks(1000);
+    CHECK(g_lw.asleep && sim.backlight == 0 && sim.seg_en == 0 && sim.led_mask == 0);
+    sim_key_set(3, 1); ms_ticks(100); sim_key_set(3, 0); ms_ticks(100);
+    CHECK(!g_lw.asleep && !g_lw.up && sim.backlight == 1 && sim.seg_en == 1);
+    CHECK(g_boot_live && sim_screen_crc() == sim_boot_crc);
+    CHECK(g_led.mode == LED_MODE_BLINK && g_led.mask == LED_B);
+    for (uint32_t i = 0; i < 601; i++) ms_ticks(1000);
+    CHECK(g_lw.asleep);
+    send(LK_PING, 0, 0);                                         /* 主机回来 (没 HELLO): 醒 + 恢复 */
+    CHECK(next_reply() && !g_lw.asleep && g_lw.up && sim.backlight == 1);
+}
+
+/* USB 拔掉 (hotplug 回调): 不用等 5 s */
+static void test_unplug(void){
+    send(LK_HELLO, 0, 0);
+    while (next_reply()) {}
+    push_solid(0xF800);
+    sim_usb_unplug();
+    ms_ticks(20);
+    CHECK(!g_lw.up && g_boot_live && sim_screen_crc() == sim_boot_crc);
+    send(LK_HELLO, 0, 0);
+    while (next_reply()) {}
 }
 
 int main(void){
@@ -129,6 +240,11 @@ int main(void){
     test_unknown_and_ping();
     test_hello_clock();
     test_link_lost_and_rehello();
+    test_lost_boot_screen();
+    test_lost_in_immersive();
+    test_host_sleep();
+    test_idle_sleep_and_key_wake();
+    test_unplug();
     printf("dispatch: %s\n", fails ? "FAILED" : "all OK");
     return fails ? 1 : 0;
 }

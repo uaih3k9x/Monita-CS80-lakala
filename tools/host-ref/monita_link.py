@@ -1,4 +1,4 @@
-"""Monita link 协议 v0 的 Python 参考实现 (docs/protocol.md), 覆盖到 fw v9 (KEY / LED / 沉浸模式 IMM_*)。
+"""Monita link 协议 v0 的 Python 参考实现 (docs/protocol.md), 覆盖到 fw v10 (KEY / LED / 沉浸模式 IMM_* / SLEEP)。
 
 只用标准库; 打开串口优先用 pyserial (`pip install pyserial`), 没装时 POSIX 上退回 PosixPort (termios)。
 纯逻辑 (编帧、拆帧、RGB565、tile 差分打包、IMM 载荷) 不依赖串口, 见 test_monita_link.py。
@@ -14,6 +14,7 @@ PROTO_VER = 0
 HELLO, SEG, RECT, PRESENT, BACKLIGHT, FBCRC, DIAG, PING = 0x01, 0x10, 0x20, 0x21, 0x30, 0x40, 0x50, 0x7F
 COPY = 0x22
 LED = 0x31                                      # fw v8
+SLEEP = 0x32                                    # fw v10: 空 -> ACK, 设备关背光 / 段码屏 / 灯, 下一帧叫醒
 IMM_ENTER, IMM_EXIT, IMM_RECT, IMM_SCROLL = 0x60, 0x61, 0x62, 0x63   # fw v9
 HELLO_ACK, KEY, DIAG_R, ACK = 0x81, 0x90, 0xD0, 0xFE
 OK, EPARAM, EUNSUP = 0, 1, 3
@@ -21,6 +22,7 @@ W, H = 800, 1280
 TILE_W, TILE_H = 32, 16
 CAP_FBCRC, CAP_DOUBLEBUF, CAP_COPY, CAP_TRIBUF = 0x0001, 0x0002, 0x0004, 0x0008
 CAP_KEYS, CAP_LED, CAP_IMMERSIVE = 0x0010, 0x0020, 0x0040
+CAP_SLEEP = 0x0080                              # fw v10: SLEEP + 主机走了 (5 s 没帧) 回开机画面
 KEY_DOWN, KEY_UP, KEY_LONG = 1, 2, 3
 LED_R, LED_G, LED_B = 1, 2, 4
 LED_OFF, LED_ON, LED_BLINK = 0, 1, 2
@@ -296,6 +298,10 @@ class Link:
 
     def led(self, mask, mode, period_ms=0, on_ms=0, duration_ms=0):
         return self.call(LED, led_payload(mask, mode, period_ms, on_ms, duration_ms))
+
+    def sleep(self):
+        """SLEEP (fw v10): 设备回 ACK 后关背光、段码屏、灯; 之后发任何一帧都会叫醒它 (所以睡着时别发 PING)"""
+        return self.call(SLEEP)
 
     # ---- 沉浸模式 (fw v9, caps bit6) ----
 

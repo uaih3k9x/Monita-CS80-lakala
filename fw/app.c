@@ -15,8 +15,12 @@
  *   滚动 = 主循环每帧最多写一次扫描基址 (缓动在固件里), 原厂 fb 当保留缓冲 (换底绕道 / 退出时留住最后一帧)。
  *   IMM_EXIT 还掉卷轴、重新拿第二、三块 (拿不到就少几块, ACK 里给新的 caps)。沉浸模式下 RECT / COPY / PRESENT / 旧 DIAG 一律拒。
  *   未连接: 蓝灯 2 s 亮 1 s 灭 (同原厂常态心跳); HELLO 后熄灭, 交给主机 LED (0x31);
- *   HELLO 之后 15 s 收不到任何字节 = 主机走了 (link/linkwd.h), 回到蓝灯心跳, 也不再发 KEY;
- *   (v9) 之后又收到字节就当主机回来了: 恢复 KEY 上报, 灯恢复成主机最后设的样子 (主机睡醒后不一定重发 HELLO)。
+ *   (v9) 主机走了又收到帧就当回来了: 恢复 KEY 上报, 灯恢复成主机最后设的样子 (主机睡醒后不一定重发 HELLO)。
+ * 主机走了 / 休眠 (v10, link/linkwd.h + dispatch.h):
+ *   HELLO 之后 5 s 没有有效帧, 或 USB 拔掉 (ql_usb_bind_hotplug_cb 回调报"拔掉", 只在 VBUS 也断了时有) = 主机走了:
+ *   大屏重画开机版权页 (Link 行 WAIT)、段码屏回本地时钟、蓝灯心跳, 不再发 KEY。下一条 HELLO 照旧把 Link 行改 OK, 主机推整帧。
+ *   主机发 SLEEP (0x32, Mac 睡眠 / 关显示器时) 或没主机满 10 min: 关背光 (GPIO7)、段码屏 EN (GPIO10) 拉低、灭灯;
+ *   任何一帧叫醒 (段码屏重新初始化), 按键也能叫醒 (显示开机页, 10 min 后再睡)。
  *
  * 入口约定 (照原厂): enter 里只配看门狗 + 建任务就返回, 不得阻塞; 任务 prio 12, 7 参数, event_count = 1。
  */
@@ -30,7 +34,7 @@
 #include "linkwd.h"
 #include "imm.h"
 
-#define FW_VER       0x0009u          /* 9: 沉浸模式 (link/imm.h), 主机不经 HELLO 回来时恢复 KEY/灯 (link/linkwd.h), PWRKEY 慢采样不丢轻点; 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
+#define FW_VER       0x000Au          /* 10: 主机走了回开机画面 / SLEEP + 10 min 自动休眠 (link/linkwd.h), USB 拔掉即时检测; 9: 沉浸模式 (link/imm.h), 主机不经 HELLO 回来时恢复 KEY/灯 (link/linkwd.h), PWRKEY 慢采样不丢轻点; 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
 #define MAX_PAYLOAD  32768u          /* 800 x 20 行 RGB565 + 8 字节头 = 32008, 放得下一条整行带 */
 #define RX_CHUNK     16384u
 #define PORT         R05_PORT_USB_MODEM
@@ -235,6 +239,7 @@ static void tri_uncollapse(void){
  * g_boot_live: 开机画面还原样在屏上 (没收到过 RECT / COPY / DIAG)。只有这时 HELLO 才去改 Link 行。 */
 #include "bootscreen.h"
 static int g_boot_live;
+static int g_seg_ok;                   /* 开机时段码屏 GPIO 初始化结果 (开机页上显示; 主机走了重画时照用) */
 
 static void boot_draw(int seg_ok){
     uint32_t q[8] = {0};
@@ -419,6 +424,38 @@ static void diag_nbuf(uint8_t v){
     diag_reply(32, 0, &w, 1);
 }
 
+/* ---- 主机走了 / 休眠 (fw v10), dispatch.h 用 ---- */
+/* 开机版权页重画到屏上: 先退出沉浸模式 (还回多缓冲), 没提交的改动作废、等待锁存的落定, 再画在正在扫描的那块上 */
+static void boot_redraw(void){
+    if (!g_lcd_ok) return;
+    imm_exit();
+    if (g_tb.n > 1){
+        if (g_tb.d >= 0){ g_tb.ver[g_tb.d] = 0; g_tb.d = -1; g_tb.y0 = LCD_H; g_tb.y1 = 0; }
+        tb_poll();
+        if (g_tb.p >= 0){ tb_wait_evt(0); tb_latched(&g_tb); }
+    } else flush_dirty();
+    boot_draw(g_seg_ok);
+}
+
+/* 背光 (GPIO7) + 段码屏 EN (GPIO10, 高 = 亮)。醒来时段码屏整个重新初始化 (EN 拉低期间控制器状态是否保持没证实; 照开机走一遍最稳,
+ * 约 0.4 s, 会闪一下 888888), 之后调用方重画。大屏面板本身不动 (LCDC 照常扫描), 只关背光。 */
+static void panel_power(uint32_t on){
+    if (!on){ if (g_lcd_ok) lcd_backlight(0); fg_off(); return; }
+    fg_init();
+    if (g_lcd_ok) lcd_backlight(1);
+}
+
+/* USB 插拔回调 (内核 VBUS / 充电器通知里调, 线程未证实): 只计数。state 0 = 拔掉。原厂 app 也注册了一个 (只打日志) */
+static volatile uint32_t g_usb_out_n;
+static uint32_t g_usb_out_seen;
+static int usb_hotplug_cb(uint32_t state, void *ctx){ (void)ctx; if (state == R05_USB_HOTPLUG_OUT) g_usb_out_n++; return 0; }
+static int usb_unplugged(void){
+    uint32_t n = g_usb_out_n;
+    if (n == g_usb_out_seen) return 0;
+    g_usb_out_seen = n;
+    return 1;
+}
+
 #include "dispatch.h"   /* on_frame / ack / KEY 上报 / 主机在不在 (和 tools/fwsim 共用) */
 
 static void uart_cb(uint32_t ind, uint32_t port, uint32_t size){
@@ -437,11 +474,12 @@ static void show_err(int code){
 static void task_entry(void *arg){
     (void)arg;
     int seg_err = fg_init();                           /* 888888 */
+    g_seg_ok = seg_err == 0;
     int lcd_err = lcd_power_on();
     if (lcd_err == 0){
         g_lcd_ok = 1;
         dbuf_init();
-        boot_draw(seg_err == 0);
+        boot_draw(g_seg_ok);
         ql_rtos_task_sleep_ms(200);
         lcd_backlight(1);
         seg_draw_local();
@@ -451,12 +489,13 @@ static void task_entry(void *arg){
 
     g_led_ok = led_hw_init() == 0;
     led_init(&g_led); led_default(); led_poll();
-    keys_init(&g_keys); pwr_init(&g_pwr); lw_init(&g_lw);
+    keys_init(&g_keys); pwr_init(&g_pwr); lw_init(&g_lw, now_ms());
 
     lk_init(&g_p, g_pl, MAX_PAYLOAD);
     ql_rtos_semaphore_create(&g_sem, 0);
     ql_uart_open(PORT);
     ql_uart_register_cb(PORT, uart_cb);
+    ql_usb_bind_hotplug_cb(usb_hotplug_cb);            /* 失败也无妨: 照样靠 5 s 超时 */
     g_keys_ok = (keys_hw_init() & 7u) == 0;            /* PWRKEY 注册失败只少键 1, 其余照用 */
 
     uint32_t last_rx = now_us(), last_wdt = last_rx;
@@ -477,7 +516,7 @@ static void task_entry(void *arg){
         if (!lk_idle(&g_p) && t - last_rx > 500000u) lk_reset(&g_p);   /* 半截帧: 丢掉重新找同步字 */
         if (t - last_wdt > 1000000u){ ql_dev_feed_wdt(); last_wdt = t; }
         if (lcd_err == 0) clk_tick(t);
-        link_lost_poll();                              /* 主机走了: 回到未连接心跳 */
+        link_lost_poll();                              /* 主机走了: 开机画面 + 心跳; 太久没主机: 休眠 */
         keys_poll();
         led_poll();
         imm_poll();

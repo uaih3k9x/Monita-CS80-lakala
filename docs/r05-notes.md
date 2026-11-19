@@ -115,6 +115,7 @@ ql_mipi_lcd_write_screen(0x80de0000)   整个生命周期只调这一次
 - cache：原厂没做 clean。我们写完做一遍 DCCMVAC（32 B 一行）+ `dsb`。帧缓冲在 PSRAM、走 write-back cache，不 clean 的话像素会卡在 cache 里。整屏 clean ≈ 1.3 ms【实机】。
 - `ql_mipi_lcd_write_screen` 可以**反复调**：每次只是重写层基址（≈ 5–18 µs，返回 0），换一块内存就是翻页【证实，实机】。
 - **背光是 GPIO，不是 PWM**：原厂只有开/关两档，没导入 PWM。要调亮度只能软件 PWM（GPIO7）。
+  fw v10 休眠就是 GPIO7 = 0（LCDC 照常扫描、面板不断电，醒来 GPIO7 = 1 即可）。`ql_lcd_set_brightness` 是 SPI LCD 那一套，和这块屏无关。
 
 ### LCD 控制器寄存器（实机读到的）【证实】
 
@@ -196,6 +197,18 @@ R05 内核的用法（静态分析）：
 - 吞吐【实机，Windows】：裸链路 ≈ 8–8.6 MB/s；USB 有流控，设备处理慢时主机写入会被压住，连续 16 MB 不丢。
   唯一见过的丢数据是设备刚开机那一下（HELLO 之后发的大块只到了一部分），所以上位机连上后应先 HELLO 再推整帧，并看 ACK 里的统计。
 - 看门狗：照原厂，enter 里 `ql_dev_cfg_wdt(1)`，任务循环里每秒 `ql_dev_feed_wdt()`。
+
+### USB 插拔检测（fw v10 用）【证实：反汇编；回调真不真会来待上机】
+
+- `ql_usb_bind_hotplug_cb(cb)`（`e1cb216b`）：只把 `cb` 存进一个全局指针、返回 0。内核自己的处理函数（在 USB 初始化时挂到 VBUS / 充电器通知上）
+  先算一次状态，再 `cb(state, NULL)`（尾调用，返回值不看）。原型按 Quectel CSDK：`int cb(QL_USB_HOTPLUG_E state, void *ctx)`。
+- **原厂 app 也注册了一个**（`usb_hotplug_cb`，在它的电源管理任务里，和 `ql_sleep_register_cb` / `ql_autosleep_enable` 一起）：
+  `state == 0` 打 "USB plug out"，否则 "USB inserted"，只打日志。所以 0 = 拔掉。
+- 状态值（= `ql_usb_get_hotplug_state`，哈希 `2fe4cc79`，名字是按 CSDK 命名撞出来的，已补进导出表 CSV）：充电器模块报没有 VBUS → 0；
+  有 VBUS 时 USB 状态机在"状态 4"→ 2，否则 1（推测 4 = 已枚举 / configured）。回调只在 VBUS 变化时来：
+  设备另有供电、只断了数据线，或主机让 USB 挂起时**不会**报 0。fw v10 只认 0，其余情况靠 5 s 没帧兜底。
+- `ql_usb_get_detmode(out)`（`2abc7259`）把 16 字节的检测配置（首字节 = 检测方式，0..2）抄出来，`ql_usb_set_detmode` 改它并重新应用；
+  只是配置，不是插拔状态，固件没用。
 
 ## 6. 段码屏 FG00
 

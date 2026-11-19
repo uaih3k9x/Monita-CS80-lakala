@@ -9,6 +9,7 @@
   python cs80.py PORT diffdemo [秒]         tile 差分: 一个小方块在屏上移动, 打印每帧 rect 数和耗时
   python cs80.py PORT seg TEXT              段码屏主区显示数字串, 例如 123456 / --:-- 不支持冒号
   python cs80.py PORT backlight 0|1
+  python cs80.py PORT sleep              # fw v10: 关背光 / 段码屏 / 灯, 下一条命令 (任何一帧) 叫醒
   python cs80.py PORT teartest              撕裂 A/B 对比 (要人看/拍慢动作), 各阶段会打印提示
   python cs80.py PORT scrollbench [N]       歌词区 COPY 滚动测速 (同 Mac --bench 的 COPY 段): 两种翻页模式各 N 帧 + FBCRC
   python cs80.py PORT tri [N]               多缓冲状态 (fw v6); 给 N (1..3, 0 = 自动) 则先切块数
@@ -261,6 +262,8 @@ def main():
         print(link.seg(ml.seg_number(args[0])))
     elif cmd == "backlight":
         print(link.backlight(args[0] != "0"))
+    elif cmd == "sleep":
+        print(link.sleep())
     else:
         print(__doc__); sys.exit(2)
     link.close()

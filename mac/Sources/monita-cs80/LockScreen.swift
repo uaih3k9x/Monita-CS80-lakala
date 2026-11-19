@@ -7,11 +7,23 @@ import Foundation
 import ImageIO
 
 /// 当前主屏壁纸：URL + mtime 做缓存键，缩放结果（800×1280）只算一次
+/// 渲染线程只读 image；刷新走 refreshInBackground（后台队列，正在刷就不再排）。
+/// 以前渲染线程每分钟在锁屏页里同步刷新：NSWorkspace 要在主线程问，锁屏久了（显示器睡着）主线程那一下会卡住，
+/// 渲染线程跟着卡到解锁后 31 s 才切回歌词（日志里整整 3 小时没有渲染统计）。
 final class Wallpaper {
+    private let lock = NSLock()
     private var key = ""
-    private(set) var image: CGImage?
+    private var _image: CGImage?
+    var image: CGImage? { lock.lock(); defer { lock.unlock() }; return _image }
+    private let queue = DispatchQueue(label: "monita.wallpaper", qos: .utility)
+    private lazy var coalescer = Coalescer(schedule: { [queue] in queue.async(execute: $0) })
 
-    /// 返回 true 表示壁纸换了（需要整帧）
+    /// 后台刷新；换了就 requestFull（渲染循环下一次推整帧）
+    func refreshInBackground() {
+        coalescer.request { [self] in if refresh() { shared.requestFull() } }
+    }
+
+    /// 同步刷新（--png 用；别在渲染线程上调）。返回 true 表示壁纸换了（需要整帧）
     @discardableResult
     func refresh() -> Bool {
         let url = currentURL()
@@ -21,10 +33,11 @@ final class Wallpaper {
                 .timeIntervalSince1970 ?? 0
             k = url.path + "|" + String(mtime)
         }
-        if k == key { return false }
-        key = k
-        image = url.flatMap { load($0) }
-        log("壁纸：\(url?.path ?? "无（回退 CDE 锁屏）")\(url != nil && image == nil ? "（解码失败，回退）" : "")")
+        lock.lock(); let same = k == key; lock.unlock()
+        if same { return false }
+        let img = url.flatMap { load($0) }
+        lock.lock(); key = k; _image = img; lock.unlock()
+        log("壁纸：\(url?.path ?? "无（回退 CDE 锁屏）")\(url != nil && img == nil ? "（解码失败，回退）" : "")")
         return true
     }
 

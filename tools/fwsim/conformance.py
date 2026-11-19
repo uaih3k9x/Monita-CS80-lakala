@@ -135,7 +135,7 @@ class Probe:
     def __init__(self, sim, cfg):
         self.sim, self.cfg, self.out = sim, cfg, {}
         self.want_sod = local_sod(cfg["now"], cfg["zone"])
-        self.hello_at = self.seg_at = None
+        self.hello_at = self.seg_at = self.quiet_at = None
 
     def __call__(self, label):
         st = self.sim.stat()
@@ -144,7 +144,8 @@ class Probe:
         clock = st["clk_valid"] == 1 and seg_text(fg) == "------ " + hms(st["clk_sod"])
         if label == "boot":                                  # 上位机连上之前
             v = dict(seg=seg_text(fg), clk_valid=st["clk_valid"], led=led_state(st), backlight=[st["backlight"], st["bl_writes"]],
-                     link_up=st["link_up"], boot_live=st["boot_live"])
+                     link_up=st["link_up"], boot_live=st["boot_live"], boot_screen=st["boot_screen"], asleep=st["asleep"],
+                     seg_en=st["seg_en"])
         elif label == "hello":                               # 第一条 HELLO (带时间) 之后
             d = (st["clk_sod"] - self.want_sod) % 86400       # HELLO 之后过了不到 1 s
             self.hello_at = (t, st["clk_sod"])
@@ -164,7 +165,31 @@ class Probe:
         elif label == "imm_anim":                            # IMM_SCROLL 300 -> 320, 100 ms 刚 ACK
             v = [st["im_ytgt"], st["im_y0"], st["im_d"], st["im_dur"], 300 <= st["im_pos"] <= 320]
         elif label == "rehello":                             # 不带时间的 HELLO: KEY 计数清零、灯交还主机、时钟照走
+            self.quiet_at = t                                # 上位机从这里起不发了 (fw v10: 5 s 后算走了)
             v = dict(key_n=st["key_n"], led=led_state(st), clk_valid=st["clk_valid"], link_up=st["link_up"])
+        elif label == "lost":                                # fw v10: 5 s 没有效帧 -> 开机版权页、段码屏本地时钟、蓝灯心跳
+            end = self.quiet_at + 9
+            while st["link_up"] and time.monotonic() < end:
+                time.sleep(0.05)
+                st = self.sim.stat()
+            dt = time.monotonic() - self.quiet_at
+            fg = bytes.fromhex(st["fg"])
+            clock = st["clk_valid"] == 1 and seg_text(fg) == "------ " + hms(st["clk_sod"])
+            v = dict(after=True if 4.6 <= dt <= 6.2 else round(dt, 2), link_up=st["link_up"], boot_screen=st["boot_screen"],
+                     boot_live=st["boot_live"], seg_clock=clock or seg_text(fg), led=led_state(st), backlight=st["backlight"],
+                     asleep=st["asleep"])
+        elif label == "sleep":                               # SLEEP: 背光 / 段码屏 EN / 灯全关, 本地时钟不刷段码屏
+            w0 = st["seg_writes"]
+            time.sleep(1.2)
+            st2 = self.sim.stat()
+            v = dict(asleep=st["asleep"], backlight=st["backlight"], seg_en=st["seg_en"], seg_off=st["seg_off"], led=led_state(st),
+                     link_up=st["link_up"], seg_quiet=st2["seg_writes"] == w0 and st2["asleep"] == 1)
+        elif label == "wake":                                # 上位机醒来重新 HELLO (带时间): 全开, Link 行 OK, 时钟重新对过
+            d = (st["clk_sod"] - self.want_sod) % 86400
+            self.hello_at = (t, st["clk_sod"])
+            v = dict(asleep=st["asleep"], backlight=st["backlight"], seg_en=st["seg_en"], seg_off=st["seg_off"], link_up=st["link_up"],
+                     boot_live=st["boot_live"], led=led_state(st), clk=True if d <= 2 else hms(st["clk_sod"]),
+                     seg_clock=clock or seg_text(fg))
         elif label == "end":                                 # 会话结束: 时钟按秒走; SEG 5 s 没续就回本地时钟
             if self.seg_at is not None:
                 time.sleep(max(0.0, self.seg_at + 6.2 - time.monotonic()))
@@ -304,6 +329,15 @@ def python_session(sim, probe, now):
     p2 = link.ping()
     res["rehello"] = dict(ok=True, frames=p2["frames"], rx_bytes=p2["rx_bytes"])
     probe("rehello")
+
+    if info["caps"] & ml.CAP_SLEEP:                           # fw v10: 不发了 -> 走了; SLEEP; 醒来重新 HELLO
+        probe("lost")
+        res["sleep"] = [link.call(ml.SLEEP, b"\x00")["status"], link.sleep()["status"]]
+        probe("sleep")
+        link.hello()
+        p3 = link.ping()
+        res["wake"] = dict(frames=p3["frames"], rx_bytes=p3["rx_bytes"])
+        probe("wake")
     link.close()
     return res
 
@@ -402,7 +436,7 @@ def swift_session(sim, probe, now, zone, exe):
 
 def expected(cfg):
     nbuf, mp, rows = cfg["nbuf"], cfg["max_payload"], cfg["imm_rows"]
-    caps = ml.CAP_FBCRC | ml.CAP_COPY | ml.CAP_KEYS | ml.CAP_LED | ml.CAP_IMMERSIVE
+    caps = ml.CAP_FBCRC | ml.CAP_COPY | ml.CAP_KEYS | ml.CAP_LED | ml.CAP_IMMERSIVE | ml.CAP_SLEEP
     caps |= ml.CAP_DOUBLEBUF if nbuf > 1 else 0
     caps |= ml.CAP_TRIBUF if nbuf > 2 else 0
     strip_rows = (min(mp, 32768) - 8) // (W * 2)
@@ -426,14 +460,22 @@ def expected(cfg):
                        garbage=[1, 0, 0, 15],
                        half=[1, 0, 0, 18]),       # 半截帧 0.5 s 没后续就丢
         "rehello": dict(ok=True, frames=2, rx_bytes=10),
+        # fw v10: 带载荷的 SLEEP 被拒, 空的 OK; 醒来 HELLO 清计数
+        "sleep": [ml.EPARAM, ml.OK], "wake": dict(frames=2, rx_bytes=10),
         # 模拟器里固件的副作用 (Probe): 开机蓝灯 2 s 亮 1 s 灭 (1.024 ms 单位 2000/1000)、段码屏 "------";
         # HELLO 后小时钟 = 固定时刻在 zone 的当地时间, 灯灭; SEG 原样进显存; LED 生效、被拒的不动它;
         # 再 HELLO: KEY 计数清零、灯灭; 时钟按秒走, SEG 5 s 后回本地时钟
         "sim": dict(boot=dict(seg="------", clk_valid=0, led=[2, ml.LED_B, 2000, 1000, 0, True], backlight=[1, 1],
-                              link_up=0, boot_live=1),
+                              link_up=0, boot_live=1, boot_screen=1, asleep=0, seg_en=1),
                     hello=dict(clk=True, seg_clock=True, led=[0, True], key_n=0, link_up=1, boot_live=0),
                     seg=dict(fg=True, seg_host_seen=1), keys=dict(seg_held=True), backlight=[0, 2], led=[2, ml.LED_G, 100, 400, 0, True],
-                    rehello=dict(key_n=0, led=[0, True], clk_valid=1, link_up=1), end=dict(tick=True, seg_clock=True)),
+                    rehello=dict(key_n=0, led=[0, True], clk_valid=1, link_up=1), end=dict(tick=True, seg_clock=True),
+                    # fw v10: 5 s 没帧 -> 开机版权页 (屏上 CRC = 开机时那一屏)、段码屏本地时钟、蓝灯心跳, 背光照开
+                    lost=dict(after=True, link_up=0, boot_screen=1, boot_live=1, seg_clock=True,
+                              led=[2, ml.LED_B, 2000, 1000, 0, True], backlight=1, asleep=0),
+                    sleep=dict(asleep=1, backlight=0, seg_en=0, seg_off=1, led=[0, True], link_up=0, seg_quiet=True),
+                    wake=dict(asleep=0, backlight=1, seg_en=1, seg_off=0, link_up=1, boot_live=0, led=[0, True], clk=True,
+                              seg_clock=True)),
     }
     if rows < 1280 + 256:
         e["imm"] = {"enter": [ml.EUNSUP, 0]}

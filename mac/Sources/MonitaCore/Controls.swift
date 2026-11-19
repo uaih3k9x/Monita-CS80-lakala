@@ -24,11 +24,11 @@ public struct KeyEvent: Equatable {
 
 public enum KeyAction: Equatable {
     case volumeUp, volumeDown, togglePage, playPause
-    case queryLong   // 查询键长按：进 / 出沉浸模式（fw v9）
 }
 
 /// 按键事件 → 动作。+/− 按下立即生效；≡、查询 在抬起时判短按（中间没有 LONG）。
 /// 固件对 PWRKEY 长按会超时补一个 UP（实机收不到抬起回调），所以 LONG 之后的 UP 一律不算短按。
+/// 长按不绑动作（v9 查询键长按进 / 出沉浸模式，容易误触，已去掉；沉浸模式只能 --immersive 进）。
 public struct KeyMapper {
     private var armed: Set<UInt8> = []   // 收到过 DOWN、还没 LONG 的键
     public init() {}
@@ -43,7 +43,7 @@ public struct KeyMapper {
             return nil
         case .long:
             armed.remove(k)
-            return e.key == .query ? .queryLong : nil
+            return nil
         case .up:
             guard armed.remove(k) != nil else { return nil }
             switch e.key {

@@ -12,8 +12,14 @@
  *   函数   osiUpTimeUS, now_us, now_ms, reply, diag_reply, on_diag, dcache_clean, ql_uart_write, keys_hw_raw,
  *          draw_begin, draw_target, do_copy, present, flush_dirty, tb_addr,
  *          imm_enter, imm_exit, imm_make_room, tri_collapse, tri_uncollapse, diag_tri, diag_nbuf,
- *          clk_set, boot_link_ok, seg_host_active, seg_draw_local, fg_flush, lcd_backlight, led_poll
+ *          clk_set, boot_link_ok, seg_host_active, seg_draw_local, fg_flush, lcd_backlight, led_poll,
+ *          (fw v10) boot_redraw (退出沉浸模式、把开机版权页重画到屏上, Link 行 WAIT), panel_power (背光 + 段码屏 EN 开关),
+ *          usb_unplugged (hotplug 回调报过"拔掉"就返回 1, 每次拔掉只报一次)
  * 地址一律按 uintptr_t 算 (实机 32 位, 模拟器 64 位)。
+ *
+ * 主机在不在 / 休眠 (fw v10, 状态机在 linkwd.h):
+ *   主机走了 (5 s 没有效帧 / USB 拔掉) -> 开机版权页 + 段码屏本地时钟 + 蓝灯心跳, 不发 KEY;
+ *   SLEEP 或没主机满 10 min -> 关背光 / 段码屏 / 灯; 任何一帧叫醒 (HELLO 过的话恢复主机的灯), 按键也能叫醒 (显示开机页)。
  */
 #ifndef MONITA_LINK_DISPATCH_H
 #define MONITA_LINK_DISPATCH_H
@@ -37,10 +43,30 @@ static void ack(uint8_t status, uint32_t extra){
 /* HELLO_ACK 的 caps; 运行中会变 (沉浸模式里没有多缓冲, IMM_EXIT / DIAG 32 之后块数可能不同) */
 static uint32_t caps(void){
     return LK_CAP_FBCRC | LK_CAP_COPY | (g_tb.n > 1 ? LK_CAP_DOUBLEBUF : 0u) | (g_tb.n > 2 ? LK_CAP_TRIBUF : 0u)
-         | (g_keys_ok ? LK_CAP_KEYS : 0u) | (g_led_ok ? LK_CAP_LED : 0u) | (g_lcd_ok ? LK_CAP_IMMERSIVE : 0u);
+         | (g_keys_ok ? LK_CAP_KEYS : 0u) | (g_led_ok ? LK_CAP_LED : 0u) | (g_lcd_ok ? LK_CAP_IMMERSIVE : 0u) | LK_CAP_SLEEP;
 }
 
 static void led_default(void){ led_blink(&g_led, LED_B, 3000u, 2000u, now_ms()); }   /* 未连接: 蓝灯 2 s 亮 1 s 灭 */
+
+/* ---- 主机走了 / 休眠 (fw v10) ---- */
+/* 未连接的样子: 开机版权页 (Link 行 WAIT, 主机关过背光也重新打开) + 段码屏本地时钟 + 蓝灯心跳 */
+static void show_unlinked(void){
+    boot_redraw();
+    if (g_lcd_ok) lcd_backlight(1);
+    seg_host_seen = 0; seg_draw_local();
+    led_default(); led_poll();
+}
+static void dev_sleep(void){
+    led_off(&g_led); led_poll();
+    seg_off = 1;
+    panel_power(0);
+}
+/* 醒来: 背光 / 段码屏开, 段码屏重画本地画面 (主机的 SEG 会接着来), 灯先回心跳 (主机回来的话调用方再恢复) */
+static void dev_wake(void){
+    panel_power(1);
+    seg_off = 0; seg_host_seen = 0; seg_draw_local();
+    led_default(); led_poll();
+}
 
 /* 按键采样 + KEY 上报 (HELLO 之后、主机还在时才发) */
 static void keys_poll(void){
@@ -50,6 +76,8 @@ static void keys_poll(void){
     g_key_at = t;
     uint8_t ev[KEY_N * 2];
     int n = keys_feed(&g_keys, t, keys_hw_raw(&g_pwr, t), ev, (int)sizeof ev);
+    for (int i = 0; i < n; i++)                             /* 睡着时按任意键: 醒来显示开机页 (主机不在, 不发 KEY) */
+        if (KEY_EV_TYPE(ev[i]) == KEY_DOWN && lw_key(&g_lw, t) == LW_WOKE){ dev_wake(); boot_redraw(); }
     for (int i = 0; i < n && g_lw.up; i++){                 /* 没连主机: 照样走状态机, 只是不发 */
         uint8_t pl[KEY_PL_LEN], out[LK_HDR + KEY_PL_LEN + LK_TRAIL];
         keys_payload(pl, ev[i], g_key_n++, t);
@@ -83,6 +111,9 @@ static uint8_t imm_scroll(const uint8_t *pl, uint32_t n){
 /* 一帧收齐 (g_p.type / g_p.seq / g_p.len, payload 在 g_pl) */
 static void on_frame(void){
     const uint8_t *pl = g_pl; uint32_t n = g_p.len;
+    int ev = lw_rx(&g_lw, now_ms());                   /* 有效帧才算主机还在 (fw v10) */
+    if (ev & LW_WOKE) dev_wake();
+    if (ev & LW_RESUMED){ g_led = g_led_host; led_poll(); }   /* 主机回来了 (没重发 HELLO): 恢复它设的灯 */
     if (g_p.type == LK_RECT || g_p.type == LK_COPY || g_p.type == LK_DIAG) g_boot_live = 0;   /* 主机开始画了 / 诊断可能动缓冲 */
     if (g_imm){                                        /* 沉浸模式: 普通画面的写操作和会动缓冲的诊断一律拒 */
         if (g_p.type == LK_RECT || g_p.type == LK_COPY){ st.bad_param++; return; }
@@ -151,6 +182,12 @@ static void on_frame(void){
         lcd_backlight(pl[0]);
         ack(LK_OK, 0);
         return;
+    case LK_SLEEP:
+        if (n != 0){ ack(LK_EPARAM, 0); return; }
+        ack(LK_OK, 0);
+        if (lw_sleep(&g_lw)) g_led_host = g_led;       /* 醒来 (主机回来) 时恢复 */
+        dev_sleep();
+        return;
     case LK_LED:
         if (!g_led_ok){ ack(LK_EUNSUP, 0); return; }
         ack(led_cmd(&g_led, pl, n, now_ms()) ? LK_EPARAM : LK_OK, 0);
@@ -195,7 +232,6 @@ static void on_frame(void){
 /* 主循环: 收到一段字节 */
 static void link_rx(const uint8_t *d, uint32_t n){
     st.rx_bytes += n;
-    if (lw_rx(&g_lw, now_ms()) == LW_RESUMED){ g_led = g_led_host; led_poll(); }   /* 主机回来了 (没重发 HELLO) */
     while (n){
         int ev; uint32_t k = lk_feed(&g_p, d, n, &ev);
         d += k; n -= k;
@@ -203,9 +239,12 @@ static void link_rx(const uint8_t *d, uint32_t n){
     }
 }
 
-/* 主循环每轮: 主机走了 -> 回到未连接心跳 (记下主机设的灯, 回来时恢复) */
+/* 主循环每轮: 主机走了 (5 s 没帧 / USB 拔掉) -> 开机画面 + 蓝灯心跳 (记下主机设的灯, 回来时恢复); 没主机满 10 min -> 休眠 */
 static void link_lost_poll(void){
-    if (lw_tick(&g_lw, now_ms()) == LW_LOST){ g_led_host = g_led; led_default(); }
+    int ev = lw_tick(&g_lw, now_ms());
+    if (usb_unplugged()) ev |= lw_unplug(&g_lw);
+    if (ev & LW_LOST){ g_led_host = g_led; show_unlinked(); }
+    if (ev & LW_SLEEP) dev_sleep();
 }
 
 #endif

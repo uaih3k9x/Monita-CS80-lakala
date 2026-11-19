@@ -30,6 +30,7 @@ func runConformance(_ link: DeviceLink) -> Bool {
     var keys: [[Int]] = []
     link.onKey = { e in keys.append([Int(e.key.rawValue), Int(e.edge.rawValue), e.count]) }
     var res: [String: Any] = [:]
+    link.setStaleAfter(nil)                                   // 脚本自己控制每一帧 (还要专门停 5 s 看固件回开机画面)
     if let v = ProcessInfo.processInfo.environment["MONITA_FAKE_NOW"], let t = Double(v) {
         link.clock = { Date(timeIntervalSince1970: t) }
     }
@@ -125,6 +126,20 @@ func runConformance(_ link: DeviceLink) -> Bool {
     let p2 = ping()
     res["rehello"] = ["ok": h2 != nil, "frames": Int(p2.frames), "rx_bytes": Int(p2.rxBytes)]
     snap("rehello")
+
+    // fw v10：不发了 → 5 s 后固件回开机画面；SLEEP（带载荷的被拒）→ 休眠；醒来 = 渲染器真用的 resume + connectIfNeeded（重新 HELLO）
+    if info.hasSleep {
+        snap("lost")
+        let rejected = Int(ack(LinkType.sleep, [0])!.status)
+        let slept = link.sleep()
+        res["sleep"] = [rejected, slept == true ? 0 : -1]
+        snap("sleep")
+        link.resume()
+        let woke = link.connectIfNeeded()
+        let p3 = ping()
+        res["wake"] = woke ? ["frames": Int(p3.frames), "rx_bytes": Int(p3.rxBytes)] as [String: Any] : ["error": "没有重新 HELLO"]
+        snap("wake")
+    }
 
     guard let data = try? JSONSerialization.data(withJSONObject: res, options: [.sortedKeys]), let s = String(data: data, encoding: .utf8) else { return false }
     print("@result " + s)

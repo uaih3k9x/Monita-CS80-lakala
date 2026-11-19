@@ -30,3 +30,5 @@ ql_pwrkey_shutdown_time_set
 ql_pwrkey_callback_register
 ql_pwrkey_press_cb_register
 ql_pwrkey_release_cb_register
+# USB 插拔回调 (fw v10, 主机走了即时检测)
+ql_usb_bind_hotplug_cb

@@ -60,6 +60,14 @@ extern int  ql_uart_register_cb(uint32_t port, r05_uart_cb_t cb);
 #define R05_UART_IND_RX    0x82060001u
 #define R05_UART_IND_RX2   0x82060002u
 
+/* ---- USB 插拔 (fw v10; 原厂 app 也注册了一个, 回调里只打 "USB plug out" / "USB inserted" 日志) ----
+ * 内核在 VBUS / 充电器状态变化时调 cb(state, NULL), 返回值不看; bind 只存一个指针 (再 bind 覆盖), 返回 0。
+ * state 同 ql_usb_get_hotplug_state (hash 2fe4cc79): 0 = 拔掉 (没有 VBUS), 1 / 2 = 插着 (2 = USB 状态机在某个状态 4, 推测已枚举)。
+ * 只在 VBUS 真的断了时才有 0: 设备另有供电、只断了数据, 或主机 USB 挂起时不报。 */
+typedef int (*r05_usb_hotplug_cb_t)(uint32_t state, void *ctx);
+extern int  ql_usb_bind_hotplug_cb(r05_usb_hotplug_cb_t cb);
+#define R05_USB_HOTPLUG_OUT 0u
+
 /* ---- 信号量 (原厂: create(&s, 0); wait(s, 超时 ms) 返回 0 = 拿到; release(s)) ---- */
 extern int  ql_rtos_semaphore_create(void **sem, uint32_t init);
 extern int  ql_rtos_semaphore_wait(void *sem, uint32_t timeout_ms);

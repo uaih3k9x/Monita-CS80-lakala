@@ -41,11 +41,12 @@ func feed(_ m: inout KeyMapper, _ evs: [(PanelKey, KeyEdge)]) -> [KeyAction] {
     #expect(feed(&m, [(.menu, .down), (.menu, .long), (.menu, .up)]) == [])   // 长按不切
 }
 
-@Test func queryShortPlayPauseLongReserved() {
+@Test func queryShortPlayPauseLongDoesNothing() {
     var m = KeyMapper()
     #expect(feed(&m, [(.query, .down), (.query, .up)]) == [.playPause])
-    // 固件对 PWRKEY 长按超时自恢复：LONG 之后补一个 UP，不能再当短按
-    #expect(feed(&m, [(.query, .down), (.query, .long), (.query, .up)]) == [.queryLong])
+    // 固件对 PWRKEY 长按超时自恢复：LONG 之后补一个 UP，不能再当短按。
+    // 长按留空（v9 是进 / 出沉浸模式，容易误触；沉浸模式只能 --immersive 进）
+    #expect(feed(&m, [(.query, .down), (.query, .long), (.query, .up)]) == [])
 }
 
 @Test func upWithoutDownIsIgnored() {

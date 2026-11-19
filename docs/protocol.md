@@ -1,7 +1,7 @@
 # 上位机 ↔ R05 固件协议 v0
 
 > 状态：**v0，已实现并实机跑通**（固件 `fw/app.c` + `fw/link/proto.h`，参考上位机 `tools/host-ref/`、`mac/`）。
-> fw v8 加的 KEY / LED、fw v9 加的沉浸模式 IMM_* 都是向后兼容的增量（`caps` 新位，`proto_ver` 不变），**还没上机**。
+> fw v8 加的 KEY / LED、fw v9 加的沉浸模式 IMM_*、fw v10 加的 SLEEP / 主机走了回开机画面都是向后兼容的增量（`caps` 新位，`proto_ver` 不变），**还没上机**。
 > 协议与平台无关：能打开 USB 串口、能画一张 800×1280 的图，就能当上位机。以后改动会升 `proto_ver`。
 
 设计原则：**简单、流式、设备侧不需要大缓冲**。设备 app 只有 128 KiB RAM，一帧 payload 最多 32 KiB，
@@ -58,6 +58,7 @@ RECT / COPY / IMM_RECT 不应答（被拒也不应答，只计 `bad_param`），
 | 0x22 | → | COPY | `u16 sx, sy, w, h, dx, dy`（fw v2，`caps` bit2） | 无 |
 | 0x30 | → | BACKLIGHT | `u8 on`（0 灭，非 0 亮） | ACK |
 | 0x31 | → | LED | `u8 mask, u8 mode, u16 period_ms, u16 on_ms, u16 duration_ms`（fw v8，`caps` bit5，见下） | ACK |
+| 0x32 | → | SLEEP | 空（fw v10，`caps` bit7，见"主机走了 / 休眠"） | ACK |
 | 0x40 | → | FBCRC | `u16 x, y, w, h` | ACK（extra = 这块像素的 CRC-32） |
 | 0x50 | → | DIAG | `u8 op` + 参数（诊断用，不稳定，见 `fw/link/diag.h`，op 表见下文 "DIAG"） | DIAG_R (0xD0) |
 | 0x60 | → | IMM_ENTER | `u32 y0`（可省 = 0）（fw v9，`caps` bit6，见"沉浸模式"） | ACK（extra = 卷轴行数 R） |
@@ -76,6 +77,7 @@ HELLO 会把设备侧的统计计数清零。带了时间的话，设备用它�
 fw v7 起开机大屏是版权页（固件版本、构建日期、堆剩余、缓冲块数、段码屏初始化结果），Link 行黄色 `WAIT`；
 开机后第一条 HELLO（之前没收到过 RECT / COPY / DIAG）会把这一行改成绿色 `OK`，只重画这一行，之后由主机推帧接管全屏。
 主机侧不需要任何改动：照旧 HELLO 后推一次整帧。版权页画在当前前台缓冲上，其余缓冲第一次被用时整屏同步。
+fw v10：主机走了（见"主机走了 / 休眠"）时重画一遍版权页（Link 行回到 `WAIT`），下一条 HELLO 照样改 `OK`。
 
 ```
 HELLO_ACK (16 B):
@@ -86,7 +88,8 @@ u16 height        1280
 u8  pixfmt        1 = RGB565 小端 (R 在高 5 位)
 u8  seg_bytes     72
 u16 caps          bit0 FBCRC；bit1 DOUBLEBUF（双缓冲，见 PRESENT）；bit2 COPY（fw v2）；bit3 TRIBUF（三缓冲，fw v6）；
-                  bit4 KEYS（按键上报，fw v8）；bit5 LED（状态灯，fw v8）；bit6 IMMERSIVE（沉浸模式，fw v9）
+                  bit4 KEYS（按键上报，fw v8）；bit5 LED（状态灯，fw v8）；bit6 IMMERSIVE（沉浸模式，fw v9）；
+                  bit7 SLEEP（SLEEP + 主机走了回开机画面，fw v10）
 u16 max_payload   32768
 u16 0
 ```
@@ -169,9 +172,9 @@ u8  pixels[w*h*2]    RGB565 小端，行优先；payload 长度必须正好 8 + 
 
 ### KEY（0x90，设备 → 主机，fw v8）
 
-前面板 4 个键，设备去抖后上报。**只在收到过 HELLO 之后发**；HELLO 把计数 `n` 清零；HELLO 之后 15 s（固件计时 15000 个 1.024 ms 单位，实际约 15.4 s）收不到主机任何字节（主机连着时至少每 2 s 一个 PING），
-设备当主机已经走了，停止上报。fw v8 要等下一条 HELLO 才恢复；**fw v9 起只要又收到字节就恢复**（主机睡醒、进程被挂起后接着发时不一定重发 HELLO），
-计数 `n` 接着走（不清零）。帧头 `seq` = 0，不对应任何主机帧，主机**不应答**。
+前面板 4 个键，设备去抖后上报。**只在收到过 HELLO 之后发**；HELLO 把计数 `n` 清零；主机走了（fw v10：HELLO 之后 5 s 没有有效帧，
+见"主机走了 / 休眠"；fw v8 / v9 是 15 s 没有任何字节）设备停止上报。fw v8 要等下一条 HELLO 才恢复；**fw v9 起只要又收到帧就恢复**
+（主机睡醒、进程被挂起后接着发时不一定重发 HELLO），计数 `n` 接着走（不清零）。帧头 `seq` = 0，不对应任何主机帧，主机**不应答**。
 
 ```
 u8  key       1 查询（左上，PWRKEY）  2 ≡（左下）  3 +（右上）  4 −（右下）
@@ -201,9 +204,28 @@ u16 duration_ms   0 = 一直保持；否则到时自动灭（mode 0 时忽略）
 
 - payload 必须正好 8 字节、参数合法，否则 ACK `status` = 1，灯不变；固件没有灯（`caps` 没有 bit5）时回 3。
 - 闪烁从"亮"开始；相位抖动等于固件主循环间隔（≈ 10 ms，PRESENT 等帧时最长 ≈ 55 ms），对状态灯无所谓。时间按 1.024 ms 计，长 2.4%。
-- 设备自己的灯语：**未连接时蓝灯 2 s 亮 1 s 灭**（同原厂常态心跳）；HELLO 把灯灭掉，之后完全由主机控制；主机走了（见 KEY）回到蓝灯心跳。
+- 设备自己的灯语：**未连接时蓝灯 2 s 亮 1 s 灭**（同原厂常态心跳）；HELLO 把灯灭掉，之后完全由主机控制；主机走了（见"主机走了 / 休眠"）回到蓝灯心跳，休眠时灭。
   所以主机每次重连（HELLO）都要把自己想要的灯重发一次。fw v9：主机走了又不经 HELLO 回来时，固件把灯恢复成主机走之前设的样子。
 - 参考做法（`mac/`）：播放中绿灯常亮，暂停 / 没在放熄灭；退出时发 `mode = 0`。
+
+### 主机走了 / 休眠（SLEEP 0x32，fw v10，`caps` bit7）
+
+固件自己判断主机在不在，纯逻辑在 `fw/link/linkwd.h`（主机单测 `test_linkwd.c`），分发在 `fw/link/dispatch.h`（`test_dispatch.c` 用虚拟时间测）。
+
+| 情况 | 设备做什么 |
+|---|---|
+| HELLO 之后 **5 s 没有有效帧**（CRC 对的整帧才算；乱码不算），或 **USB 拔掉**（内核 hotplug 回调报"拔掉"，只在 VBUS 真断了时有，不用等 5 s） | **主机走了**：大屏重画开机版权页（Link 行黄色 `WAIT`；在沉浸模式里先退出；主机关过背光也重新打开）、段码屏回本地时钟（`------` + 小时钟）、灯回蓝灯心跳、不再发 KEY |
+| 收到 SLEEP（空载荷；带了载荷回 `status` = 1、什么都不做） | 先回 ACK，再**休眠**：关大屏背光（GPIO7）、段码屏 EN（GPIO10）拉低、灭灯；本地时钟只走时间不刷段码屏。大屏画面（帧缓冲）不动 |
+| 没有主机（走了，或开机后一直没人连）满 **10 min** | 自动休眠（同上），避免拔了线一直亮着 |
+| 睡着时收到**任何一条有效帧** | 醒：背光开、段码屏重新初始化（会闪一下 `888888`，约 0.4 s）后画本地画面、灯回心跳；HELLO 过的话照"主机回来了"恢复 KEY 和主机设的灯。然后照常处理这一帧 |
+| 睡着时按任意键 | 醒来显示开机版权页 + 蓝灯心跳（主机不在，不发 KEY），10 min 后再睡 |
+
+- 主机正常连着时最长 ≈ 2 s 一帧（参考做法：SEG ≤ 1.5 s、PING 2 s），5 s 不会误报。主机暂停发送超过 5 s 后再接着发时，
+  屏上已经是开机画面了：**隔了 ≥ 3.5 s 才发下一条的话先重新 HELLO、再推整帧**（`mac/` 的 DeviceLink 这么做，`MonitaCore/HostPower.swift`）。
+  不这么做也能用，只是第一批差分会画在开机画面上，直到下一次整帧。
+- SLEEP 之后主机**一个字节都别再发**（PING 也会叫醒设备）。参考做法（`mac/`）：Mac `willSleep` / `screensDidSleep` 时发 SLEEP 并停掉所有循环，
+  `didWake` / `screensDidWake` 时重新 HELLO + 推整帧。主机走了 / 休眠期间设备不主动发任何东西（KEY 也不发）。
+- 时间都按 1.024 ms 计（同 LED），5 s 实际约 5.1 s，10 min 约 10.2 min。
 
 ### 沉浸模式（IMM_*，fw v9，`caps` bit6）
 
@@ -235,10 +257,10 @@ IMM_EXIT（或任何一条 HELLO）把当前画面抄回原厂 fb 显示、还�
   搬的行不和屏上的重叠就直接搬、切一次基址；否则先把当前窗口抄进保留缓冲、切过去，卷轴整个不可见了再搬、再切回来。
   屏上内容自始至终不变，不可见、不撕裂。动画停稳 200 ms 后、前面剩的行不到一半时主动做；IMM_RECT / IMM_SCROLL 需要时也会就地做
   （耗时 1–2 帧 + 搬运，整屏 ≈ 30 ms）。逻辑坐标不变。
-- 沉浸模式下 RECT / COPY 计 `bad_param`，PRESENT 回 `status` = 1，DIAG 回 `status` = 3；FBCRC 校验屏上那一段（坐标相对屏幕）；SEG / LED / BACKLIGHT / PING 照常。
+- 沉浸模式下 RECT / COPY 计 `bad_param`，PRESENT 回 `status` = 1，DIAG 回 `status` = 3；FBCRC 校验屏上那一段（坐标相对屏幕）；SEG / LED / BACKLIGHT / SLEEP / PING 照常。
 - 时间按 1.024 ms 计（同 LED），`dur_ms` 实际长 2.4%。
 
-参考做法（`mac/`，`--immersive` 或长按查询键切换）：歌词按句排成一列"块"（头部歌名 + 每句一块 + 尾部留白），
+参考做法（`mac/`，`--immersive` 开机就进；fw v9 时代的"长按查询键切换"已去掉，容易误触）：歌词按句排成一列"块"（头部歌名 + 每句一块 + 尾部留白），
 当前句居中；离当前句越远颜色越淡（上下淡出）。切句时先写新露出来的块（隐藏写）和高亮换行的两块（可见写），
 IMM_SCROLL 缓动 360 ms，停下后再补其余变了档的颜色。换歌 / 往回跳 / 一次跳太远 → IMM_ENTER 重新开始、整屏重写。
 
@@ -282,7 +304,7 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 
 ## 参考实现
 
-- Python：`tools/host-ref/monita_link.py`（协议，覆盖到 fw v9：KEY、LED、沉浸模式 IMM_*）+ `cs80.py`（命令行：hello / ping / pattern / png / bench / diffdemo / seg / teartest / scrollbench / tri / e0 / e1 / zc）。
+- Python：`tools/host-ref/monita_link.py`（协议，覆盖到 fw v10：KEY、LED、沉浸模式 IMM_*、SLEEP）+ `cs80.py`（命令行：hello / ping / pattern / png / bench / diffdemo / seg / backlight / sleep / teartest / scrollbench / tri / e0 / e1 / zc）。
   串口优先用 pyserial，没装时 POSIX 上用 termios；推 PNG 要 Pillow。`python3 -m unittest discover -s tools/host-ref`。
 - Swift：`mac/Sources/MonitaCore/Link.swift`（纯逻辑，有测试）+ `mac/Sources/monita-cs80/UsbLink.swift`（macOS IOKit，接口 7）/ `SerialLink.swift`（termios 串口，Linux 等），
   渲染器 `monita-cs80 --device usb`（或 `--device /dev/ttyUSB0`）。
@@ -294,11 +316,11 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 硬件换成假的（3 块帧缓冲、卷轴、按键注入；帧事件立即发生），开一个伪终端当 USB 串口。
 
 - `sh tools/fwsim/run.sh`：Python 参考实现和 Mac 渲染器（debug 构建）各跑一遍同一套脚本（HELLO、整帧 / COPY / FBCRC、SEG、LED、
-  按键、未知 type、DIAG、坏帧、沉浸模式 ...），四种模拟器配置（三 / 单 / 双缓冲 + 16 KiB max_payload / 卷轴不够），
+  按键、未知 type、DIAG、坏帧、沉浸模式、停发 5 s 回开机画面、SLEEP / 醒来 ...），四种模拟器配置（三 / 单 / 双缓冲 + 16 KiB max_payload / 卷轴不够），
   结果和本文档逐项对比，两个上位机之间也要一致；还对拍固件的副作用（设备时钟 / 段码屏显示 / 灯状态机 / 滚动动画 / KEY 计数），
   HELLO 的时间用固定时刻 + 时区注入。细节和变异测试结果见 `tools/fwsim/README.md`。
 - 测自己的上位机：`tools/fwsim/build/fwsim` 第一行打印 `PTY /dev/ttysNNN`，把它当串口打开即可；stdin 发 `tap 3`（按一下 + 键）、
-  `stat`（屏上 CRC、缓冲块数、段码屏显存、时钟、灯、滚动等，一行 JSON）。用的是 POSIX 伪终端（macOS / Linux；Windows 上可以在 WSL 里跑）。
+  `unplug`（USB 拔掉）、`stat`（屏上 CRC、是不是开机页、睡没睡、缓冲块数、段码屏显存、时钟、灯、滚动等，一行 JSON）。用的是 POSIX 伪终端（macOS / Linux；Windows 上可以在 WSL 里跑）。
 
 ## 以后
 

@@ -9,6 +9,7 @@
  * stdin 一行一条控制命令, 每条回一行:
  *   tap K [ms]    按一下键 K (1 查询/PWRKEY, 2 ≡, 3 +, 4 −), 按住 ms (默认 60)  -> ok
  *   down K / up K 按下 / 松开                                                       -> ok
+ *   unplug        USB 拔掉 (hotplug 回调报 0, fw v10)                                 -> ok
  *   stat          一行 JSON: 屏上 CRC、缓冲块数、沉浸模式、收拢次数、段码屏显存 + 本地时钟、灯状态机 (三色 / 闪烁相位)、
  *                 滚动动画 (起点 / 目标 / 时长 / 进度)、KEY 计数 ... (字段见 tools/fwsim/README.md)
  *   quit          退出 (stdin 关掉也退出)
@@ -60,6 +61,9 @@ static void cmd(char *line){
                sim.seg_writes, sim.collapse, sim.uncollapse,
                g_lw.up, st.rx_bytes, g_p.frames, g_p.crc_err, g_p.len_err, st.rects, st.presents,
                st.bad_param, g_flip_now, g_key_n, g_boot_live);
+        /* 主机走了 / 休眠 (fw v10): 屏上是不是开机版权页 (CRC 和开机时画的一样)、重画了几次、睡着没、段码屏 EN */
+        printf("\"boot_screen\":%d,\"boot_draws\":%u,\"asleep\":%u,\"seg_en\":%u,\"seg_off\":%d,",
+               sim_screen_crc() == sim_boot_crc, sim.boot_draws, g_lw.asleep, sim.seg_en, seg_off);
         /* 段码屏显存 + 本地时钟 (segclock.h) */
         printf("\"fg\":\"%s\",\"clk_valid\":%d,\"clk_sod\":%u,\"seg_host_seen\":%d,", fg, clk_valid, clk_sod, seg_host_seen);
         /* 状态灯状态机 (led.h): 时间都是相对现在的 1.024 ms 单位 */
@@ -77,6 +81,7 @@ static void cmd(char *line){
         sim_key_set(k, 1);
         if (op[0] == 't' && npend < 16){ pend[npend].k = k; pend[npend].at = now_ms() + (uint32_t)ms; npend++; }
     } else if (!strcmp(op, "up")) sim_key_set(k, 0);
+    else if (!strcmp(op, "unplug")) sim_usb_unplug();
     else { printf("err unknown command\n"); fflush(stdout); return; }
     printf("ok\n"); fflush(stdout);
 }

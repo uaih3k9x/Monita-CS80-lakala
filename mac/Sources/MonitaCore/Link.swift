@@ -7,6 +7,8 @@ public enum LinkType {
     public static let hello: UInt8 = 0x01, seg: UInt8 = 0x10, rect: UInt8 = 0x20, present: UInt8 = 0x21, copy: UInt8 = 0x22
     public static let backlight: UInt8 = 0x30, fbcrc: UInt8 = 0x40, diag: UInt8 = 0x50, ping: UInt8 = 0x7F
     public static let led: UInt8 = 0x31
+    /// fw v10：空 → ACK，设备关背光 / 段码屏 / 灯；之后任何一帧叫醒（caps bit7）
+    public static let sleep: UInt8 = 0x32
     public static let helloAck: UInt8 = 0x81, diagR: UInt8 = 0xD0, ack: UInt8 = 0xFE
     /// 设备主动上报的按键事件（fw v8），seq = 0，主机不应答
     public static let key: UInt8 = 0x90
@@ -97,6 +99,8 @@ public struct HelloInfo: Equatable {
     public var hasCopy: Bool { caps & 4 != 0 }
     public var hasKeys: Bool { caps & 0x10 != 0 }
     public var hasLed: Bool { caps & 0x20 != 0 }
+    /// fw v10：SLEEP + 主机 5 s 没帧回开机画面
+    public var hasSleep: Bool { caps & 0x80 != 0 }
     public var protoSupported: Bool { proto == linkProtoVer }
     /// 单条 RECT / IMM_RECT 的 payload 上限：设备给的 max_payload，但不超过本实现按 32 KiB 切的条带
     public var rectPayloadMax: Int { min(maxPayload, linkMaxPayload) }

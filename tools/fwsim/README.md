@@ -9,17 +9,19 @@
 - 真固件代码：`fw/link/dispatch.h`（on_frame / ACK / KEY / 主机在不在）+ proto / blit / tribuf / imm / keys / led / linkwd，
   段码屏本地时钟 `fw/fg00/segclock.h`（`clk_set` / `clk_tick` / `seg_draw_local`）和显存 `fw/fg00/fgbuf.h`、`segmap.h`。
   这两个头是从 `fw/app.c` / `fg00.h` 原样搬出来的，实机固件编出来逐字节不变（`bash fw/build.sh all` 的 5 个 .bin sha256 和搬之前一样）。
-- 假硬件（`simdev.h`）：3 块帧缓冲 + 卷轴、帧事件立即发生、按键电平注入；`fg_flush` / 背光 / 灯 GPIO 只记账。时间是真实单调时钟。
+- 开机版权页也是真固件代码（`fw/lcd/bootscreen.h`，日期固定）画进屏上那块缓冲，所以"主机走了回开机画面"能用屏上 CRC 对出来（`boot_screen`）。
+- 假硬件（`simdev.h`）：3 块帧缓冲 + 卷轴、帧事件立即发生、按键电平 / USB 拔掉注入；`fg_flush` / 背光 / 段码屏 EN / 灯 GPIO 只记账。时间是真实单调时钟。
 
 ## stdin 命令
 
-`tap K [ms]` / `down K` / `up K`（K：1 查询/PWRKEY，2 ≡，3 +，4 −），`stat`，`quit`。`stat` 回一行 JSON：
+`tap K [ms]` / `down K` / `up K`（K：1 查询/PWRKEY，2 ≡，3 +，4 −），`unplug`（USB 拔掉，fw v10），`stat`，`quit`。`stat` 回一行 JSON：
 
 | 字段 | 含义 |
 |---|---|
 | `screen_crc` `nbuf` `imm` `roll_rows` `collapse` `uncollapse` `flip_now` | 屏上那一帧的 CRC、多缓冲块数、沉浸模式、卷轴行数、旧 DIAG 收拢次数 |
 | `rx_bytes` `frames` `crc_err` `len_err` `rects` `presents` `bad_param` | 同 ACK 里的计数 |
 | `link_up` `key_n` `boot_live` | 主机在不在（linkwd）、下一条 KEY 的序号、开机页还在（Link 行 WAIT） |
+| `boot_screen` `boot_draws` `asleep` `seg_en` `seg_off` | 屏上那一帧和开机时画的版权页一样、版权页画了几次、睡着没（SLEEP / 10 min 没主机）、段码屏 EN、本地时钟停刷段码屏（fw v10） |
 | `backlight` `bl_writes` `seg_writes` | 背光当前值 / 写了几次、段码屏刷了几次 |
 | `fg` | 段码屏显存 72 字节（十六进制） |
 | `clk_valid` `clk_sod` `seg_host_seen` | 设备时钟有没有设、当地时间一天中第几秒、主机发过 SEG |
@@ -45,7 +47,10 @@ Europe/London 夏令时（+60）、Australia/Adelaide 南半球夏令时（+630�
 | `led` | 绿灯闪 500 / 100 生效（mode / mask / on / off / 相位），两条被拒的不动状态 |
 | `imm_anim`（IMM_SCROLL 300 → 320, 100 ms 刚 ACK） | 目标 320、起点 300、位移 20、时长 100、缓动位置在 [300, 320] |
 | `rehello`（不带时间的 HELLO） | KEY 计数清零、灯灭、时钟还在 |
-| `end`（会话结束，等到 SEG 后 6.2 s） | 时钟按秒走（和墙钟差 ≤ 1.5 s）；SEG 接管过期后回到本地时钟画面 |
+| `lost`（`rehello` 之后上位机不发了，等到 `link_up` = 0） | 4.6–6.2 s 之后算走了；屏上 = 开机版权页（CRC 对）、Link 行 WAIT、段码屏本地时钟、蓝灯心跳、背光重新开（脚本前面关过） |
+| `sleep`（带载荷的 SLEEP 被拒 + 空 SLEEP） | 睡着、背光 / 段码屏 EN / 灯全关、1.2 s 里段码屏一次都没刷 |
+| `wake`（上位机重新 HELLO：Python `hello()`，Swift 走渲染器真用的 `resume()` + `connectIfNeeded()`） | 全开、Link 行 OK、灯交还主机、设备时钟重新对上注入时刻 |
+| `end`（会话结束，等到 SEG 后 6.2 s） | 时钟按秒走（和墙钟差 ≤ 1.5 s，从 `wake` 那次 HELLO 起算）；SEG 接管过期后回到本地时钟画面 |
 
 ## 变异测试（2026-11-18）
 
@@ -102,7 +107,8 @@ Europe/London 夏令时（+60）、Australia/Adelaide 南半球夏令时（+630�
 对拍仍抓不到的（都由单测兜住）：
 
 - F19 LED duration：脚本没发带 duration 的 LED（要等它到时，拖慢对拍）。
-- F26 / F27 掉线 / 回来：要 15 s 没字节，对拍用真实时钟太慢；`test_dispatch.c` 用虚拟时间测。
+- F26 / F27 掉线 / 回来：（当时）要 15 s 没字节，对拍用真实时钟太慢；`test_dispatch.c` 用虚拟时间测。fw v10 把它缩到 5 s 有效帧后，对拍里加了 `lost` / `sleep` / `wake`，
+  但"没 HELLO 直接来帧恢复主机的灯"和"10 min 自动休眠 / 按键叫醒 / USB 拔掉"仍只在 `test_dispatch.c` 里。
 - F28：两边脚本都是先 IMM_EXIT 再重新 HELLO，没有“沉浸模式里直接 HELLO”这一步。
 - F30：注入的时刻都不在 23:59:59 附近，会话里不过零点。
 

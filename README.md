@@ -31,7 +31,7 @@
 <td align="center"><img src="docs/img/lyrics-pure.png" width="200"><br><sub>纯音乐</sub></td>
 <td align="center"><img src="docs/img/lock.png" width="200"><br><sub>锁屏 · 「主人 暂时不在」</sub></td>
 <td align="center"><img src="docs/img/clock.png" width="200"><br><sub>时钟页（≡ 键切换）</sub></td>
-<td align="center"><img src="docs/img/immersive.png" width="200"><br><sub>沉浸模式（查询键长按）</sub></td>
+<td align="center"><img src="docs/img/immersive.png" width="200"><br><sub>沉浸模式（--immersive）</sub></td>
 </tr>
 </table>
 
@@ -39,8 +39,10 @@
 - 锁屏：Mac 锁屏时换成桌面壁纸 + 小时钟 + 留言条（名字可配置；拿不到壁纸时回退成上图的 CDE 锁屏框）。
 - 时钟页：按 ≡ 键在歌词页和时钟页之间切换（fw v8）。
 - 按键（fw v8）：`+` / `−` 调 Mac 音量，查询键 播放 / 暂停，≡ 切页。状态灯：播放中绿灯常亮；没连上 Mac 时蓝灯 2 s 亮 1 s 灭（同原厂心跳）。
+- 断开 / 休眠（fw v10，还没上机）：Mac 那边 5 s 没动静（拔线、进程退出）大屏回开机版权页；Mac 睡眠 / 关显示器时背光、段码屏、灯全关，
+  Mac 醒来自动接上；没连 Mac 满 10 min 也自己关掉，按任意键看一眼。
 - 沉浸模式（fw v9，还没上机）：整屏只有歌词，当前句大字居中，离得越远越淡；切句时整屏缓动上滚——**滚动只改扫描基址，一个像素都不搬**，
-  Mac 只发新露出来的那一句。长按查询键进出，或 `--immersive` 开机就进。
+  Mac 只发新露出来的那一句。`--immersive` 开机就进（fw v9 时长按查询键也能切，容易误触，已去掉）。
 
 段码屏展示模式（示意图，代码画的，按功能分区摆放，不是玻璃的真实排布）：
 
@@ -138,7 +140,7 @@ swift build -c release
 ≡ 短按切 歌词页 ↔ 时钟页；播放中绿灯常亮，退出（SIGINT / SIGTERM）时先灭灯。`--no-keys` / `--no-led` 分别关掉；
 `--png out.png --clock --sample …` 出时钟页预览。
 
-沉浸模式（直连 + fw v9，`caps` bit6）：查询键**长按**进 / 出，或 `--immersive` 开机就进；锁屏时自动回普通锁屏页，解锁再回来。
+沉浸模式（直连 + fw v9，`caps` bit6）：`--immersive` 开机就进（查询键长按不再切换）；锁屏时自动回普通锁屏页，解锁再回来。
 设备内存不够开卷轴时（IMM_ENTER 被拒）留在普通歌词页并打日志。`--png out.png --immersive --sample … --at 40` 出预览。
 
 **mediaremote-adapter 放哪**：渲染器（播放/暂停）和 `lyrics.py`（读 Now Playing）用同一套查找顺序，第一个装好了的生效：

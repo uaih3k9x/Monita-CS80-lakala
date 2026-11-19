@@ -166,5 +166,43 @@ class V9Tests(unittest.TestCase):
         self.assertEqual(ml.STAT_NAMES[7], "uptime_ms")
 
 
+class LoopPort:
+    """假串口: 写进来的帧原样记下, 每条回一个 ACK (status 0)"""
+
+    def __init__(self):
+        self.sent, self.rx, self.in_waiting = [], bytearray(), 0
+
+    def write(self, data):
+        for t, s, p in ml.Parser().feed(bytes(data)):
+            self.sent.append((t, p))
+            self.rx += ml.encode(ml.ACK, s, bytes([t, 0, 0, 0]) + bytes(36))
+        self.in_waiting = len(self.rx)
+
+    def read(self, n):
+        out, self.rx[:] = bytes(self.rx[:n]), self.rx[n:]
+        self.in_waiting = len(self.rx)
+        return out
+
+    def reset_input_buffer(self):
+        self.rx.clear()
+
+    def close(self):
+        pass
+
+
+class V10Tests(unittest.TestCase):
+    """fw v10: SLEEP (0x32), caps bit7"""
+
+    def test_constants_match_protocol(self):
+        self.assertEqual((ml.SLEEP, ml.CAP_SLEEP), (0x32, 0x80))
+
+    def test_sleep_sends_empty_frame_and_returns_ack(self):
+        port = LoopPort()
+        link = ml.Link(port)
+        a = link.sleep()
+        self.assertEqual(port.sent, [(ml.SLEEP, b"")])
+        self.assertEqual((a["for_type"], a["status"]), (ml.SLEEP, ml.OK))
+
+
 if __name__ == "__main__":
     unittest.main()

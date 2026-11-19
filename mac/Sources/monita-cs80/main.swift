@@ -30,8 +30,10 @@
 //   --seg-png out.png：段码屏离线示意图；配 --sample 时画 播放中 / 暂停 / 没在播 三行
 //   按键 / 状态灯（直连 + fw v8，见 Controls.swift）：+/− 系统音量，≡ 切 歌词页 ↔ 时钟页，查询 播放/暂停；
 //   播放中绿灯常亮。--no-keys / --no-led 关掉；--png out.png --clock 出时钟页预览
-//   沉浸模式（直连 + fw v9，见 Immersive.swift）：整屏歌词、滚动改扫描基址（零拷贝）。--immersive 开机就进，查询键长按切换；
+//   沉浸模式（直连 + fw v9，见 Immersive.swift）：整屏歌词、滚动改扫描基址（零拷贝）。只有 --immersive 进（查询键长按不再切换）；
 //   --png out.png --immersive 出预览
+//   休眠（直连 + fw v10）：Mac 睡眠 / 关显示器时发 SLEEP（设备关背光 / 段码屏 / 灯）并停发；醒来重新 HELLO + 整帧。
+//   设备 5 s 没收到帧会自己回开机画面，所以隔了 ≥ 3.5 s 才发时 DeviceLink 先重新 HELLO（见 SerialLink.swift）
 import AppKit
 import MonitaCore
 import CoreGraphics
@@ -197,7 +199,7 @@ final class Shared {
     var lockedSince: Date? { with { $0._lockedSince } }
     /// ≡ 键切换的页（锁屏 / 屏保优先于它）
     var page: Page { get { with { $0._page } } set { set { let c = $0._page != newValue; $0._page = newValue; return c } } }
-    /// 沉浸模式开关（查询键长按 / --immersive）；锁屏 / 屏保优先于它
+    /// 沉浸模式开关（--immersive）；锁屏 / 屏保优先于它
     var immersive: Bool { get { with { $0._immersive } } set { set { let c = $0._immersive != newValue; $0._immersive = newValue; return c } } }
     func requestFull() { with { $0._markFull = true }; kick() }
     func takeFull() -> Bool { with { let v = $0._markFull; $0._markFull = false; return v } }
@@ -445,6 +447,7 @@ let forceLock = dryRun && pngLock   // --dry-run --lock：模拟锁屏
 shared.immersive = immersiveFlag && link != nil
 let immDriver = link.map { ImmersiveDriver(link: $0, page: page) }
 shared.locked = forceLock || sessionLocked()
+wallpaper.refreshInBackground()                       // 先备好，第一次锁屏不用等解码
 every(1.0, "lyrics", pauseWhenLocked: true, fetchLyrics)
 if let link {
     // 直连：每 2 s 没连上就重连（连上立即整帧），连着就 PING 当心跳
@@ -478,6 +481,25 @@ for (name, v) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlock
     DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: nil) { _ in
         log("锁屏通知：\(name)")
         shared.locked = v
+    }
+}
+// fw v10：Mac 睡眠 / 关显示器 → SLEEP（设备关背光 / 段码屏 / 灯）并停发；醒来 → 重新 HELLO + 整帧（任何一帧都会叫醒设备）
+if let link, !dryRun {
+    let ws = NSWorkspace.shared.notificationCenter
+    for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
+        ws.addObserver(forName: name, object: nil, queue: nil) { _ in
+            guard let ok = link.sleep() else { return }          // 没连着 / 已经睡了 / 固件不支持
+            log("\(name.rawValue)：设备休眠\(ok ? "" : "（SLEEP 没有应答）")")
+            shared.device = ""                                    // 渲染循环停推
+        }
+    }
+    for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+        ws.addObserver(forName: name, object: nil, queue: nil) { _ in
+            link.resume()
+            DispatchQueue.global().async {
+                if link.connectIfNeeded() { log("\(name.rawValue)：设备唤醒，推整帧"); shared.device = "up"; shared.requestFull() }
+            }
+        }
     }
 }
 // host 自己的「锁屏自动播视频屏保」开着的话，锁屏时它会抢屏：提示一下（本渲染器会让路）
@@ -533,7 +555,7 @@ func tick() -> Double {
     if nowMs() - lastFull > 3_600_000 { fullNeeded = true }  // 60 分钟兜底
     if m == .lockWallpaper && nowMs() - wallpaperCheckedAt > 60_000 {
         wallpaperCheckedAt = nowMs()
-        if wallpaper.refresh() { fullNeeded = true }  // URL 或 mtime 变了才重新解码缩放
+        wallpaper.refreshInBackground()               // 换了会 requestFull；渲染线程从不等它（以前在这儿同步问主线程，解锁后卡过 31 s）
     }
 
     let key: FrameKey

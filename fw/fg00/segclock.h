@@ -24,8 +24,10 @@ static int      clk_valid;
 static uint32_t clk_sod;              /* 当地时间, 一天中的第几秒 */
 static uint32_t clk_next_us;
 static uint32_t seg_host_at; static int seg_host_seen;
+static int      seg_off;              /* 休眠 (fw v10): 段码屏关着, 本地时钟只走时间不刷屏 */
 
 static void seg_draw_local(void){
+    if (seg_off) return;
     fg_fill(0);
     for (int i = 0; i < 6; i++) fg_digit(FG_COL_MAIN(i), SEG_DASH);
     if (clk_valid){
