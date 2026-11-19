@@ -231,5 +231,16 @@ class Lazy(unittest.TestCase):
         # 只 import 不该起 adapter 子进程/后台线程
         self.assertIsNone(L._LYRICS)
 
+
+class InjectNowPlaying(unittest.TestCase):
+    def test_np_param(self):
+        # Linux 上位机注入自己的数据源（MPRIS）；不给还是 NowPlaying（Mac 版行为不变）
+        class Src:
+            def get(self):
+                return None
+        src = Src()
+        self.assertIs(L.Lyrics(np=src).np, src)
+        self.assertIsInstance(L.Lyrics().np, L.NowPlaying)
+
 if __name__ == "__main__":
     unittest.main()

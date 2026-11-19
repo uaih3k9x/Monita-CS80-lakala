@@ -68,3 +68,11 @@ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## 外部服务与运行时依赖（不随仓库分发）
+
+- 歌词 / 封面：`tools/lyrics/lyrics.py`（Mac 版和 `linux/` 都用它）调用网易云音乐的**非官方 Web 接口**
+  （`music.163.com` 的 `/api/search/get`、`/api/song/lyric`、`/api/song/detail`）。接口没有公开文档、没有明确许可，
+  随时可能失效或被限流；歌词和封面的版权归原权利人，仓库里不包含任何歌词或封面，只在用户本机缓存（`~/.monita-cs80/lyrics/`）。
+- `linux/` 运行时用到的 Python 包都由用户自己从系统包管理器安装，仓库不包含其代码：
+  Pillow（MIT-CMU / HPND）、jeepney（MIT）、pyusb（BSD-3-Clause）、pyserial（BSD-3-Clause，可选）。

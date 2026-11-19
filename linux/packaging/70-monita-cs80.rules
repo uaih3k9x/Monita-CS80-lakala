@@ -1,0 +1,18 @@
+# Monita-CS80（R05 自制固件，USB 2c7c:0901）udev 规则示例
+#   sudo cp linux/packaging/70-monita-cs80.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger   然后拔插一次设备
+# 文件号必须小于 73：uaccess 标签由 73-seat-late.rules 处理，排在它后面就不生效。
+
+# 让 ModemManager 别去探测这台"Quectel 模块"：它会往串口发 AT 命令，打乱协议帧
+ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0901", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# pyusb 直连（--device usb）：给当前活动座席上的用户访问权限
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2c7c", ATTR{idProduct}=="0901", TAG+="uaccess"
+
+# 没有 logind / 无会话（linger、只 ssh 登录）时 uaccess 不生效，改用组权限（二选一；
+# Fedora / Arch 没有 plugdev 组，建一个或换成你自己的组）：
+# SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2c7c", ATTR{idProduct}=="0901", GROUP="plugdev", MODE="0660"
+
+# 串口路径（--device /dev/monita-cs80）：接口 7 若被内核驱动绑成 ttyUSB，给个固定名字。
+# ttyUSB 默认属于 dialout 组；无会话时把用户加进 dialout。ID_USB_INTERFACE_NUM 由 60-persistent-serial.rules 填
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0901", ENV{ID_USB_INTERFACE_NUM}=="07", SYMLINK+="monita-cs80", TAG+="uaccess"

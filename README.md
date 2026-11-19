@@ -100,6 +100,7 @@ mac/                    Swift 包 MonitaCS80
   Sources/monita-cs80/  渲染器本体（CoreGraphics 画面、锁屏、推帧循环）
   Tests/                swift-testing 用例
   Samples/              预览图用的样例数据（歌词是编的）
+linux/                  Linux 上位机（Python）：MPRIS 读正在播放、Pillow 渲染、pyusb / 串口推帧、logind 休眠、systemd / udev 示例
 tools/
   host-ref/             Python 参考上位机（pyserial 或 termios）：握手、推图、差分、KEY / LED / 沉浸模式、测吞吐、撕裂对比
   fwsim/                固件模拟器（协议层是固件原样代码，伪终端当串口）+ 上位机对照测试 run.sh
@@ -165,6 +166,7 @@ node --test tools/lyrics/tests/
 ## 欢迎贡献
 
 Windows / Linux 上位机非常欢迎有兴趣的朋友来写——我只写了 macOS 的 Swift 版，因为我懒了😂
+Linux 版已经有了一个 Python 实现（MPRIS + logind + pyusb，见 [linux/README.md](linux/README.md)），还缺真机验证，欢迎试用反馈；Windows 版仍然空着。
 
 设备那一侧说的是平台无关的 USB 串口协议（[docs/protocol.md](docs/protocol.md)），能开串口、能画一张 800×1280 的图，
 就能当它的上位机。协议还是草案，有想法欢迎开 issue 一起定。

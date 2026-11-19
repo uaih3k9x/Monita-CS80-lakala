@@ -1,0 +1,4 @@
+#!/bin/sh
+# Monita-CS80 Linux 上位机启动脚本：monita-cs80-linux --device usb [--player spotify] ...（参数见 README.md）
+DIR=$(cd "$(dirname "$0")" && pwd)
+exec env PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m monita_linux "$@"

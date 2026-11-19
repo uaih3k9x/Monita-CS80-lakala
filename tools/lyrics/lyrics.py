@@ -358,8 +358,9 @@ class NowPlaying:
 
 
 class Lyrics:
-    def __init__(self):
-        self.np = NowPlaying()
+    def __init__(self, np=None):
+        """np：当前播放数据源（有 get() -> raw dict / None）；默认 MediaRemote（Mac），Linux 上位机传 MPRIS 的。"""
+        self.np = NowPlaying() if np is None else np
         self.clock = EstimateClock()
         self.lock = threading.Lock()
         self.ids = {}        # 曲目 key → songId / None（没匹配上）
