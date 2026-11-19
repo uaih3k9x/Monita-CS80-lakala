@@ -30,6 +30,7 @@ class MprisSource:
         self.played = 0.0               # 这首歌 Playing 的累计秒数（估算模式的进度）
         self.tick = None                # 上一次 get() 的 (时刻, 是否 Playing, rate)
         self.zero_since = None          # Position 从什么时候起一直是 0
+        self.paused_since = None        # 从什么时候起不在 Playing
         self.broken = {}                # 总线名 -> 到这个时刻之前不再问
 
     def _players(self):
@@ -66,6 +67,12 @@ class MprisSource:
         return paused[0] if paused else None
 
     def get(self):
+        raw = self._get()
+        if raw is None:
+            self.tick = None            # 停止 / 没有播放器的这段时间不算进估算进度
+        return raw
+
+    def _get(self):
         st = self._players()
         name = self._choose(st)
         self.current = name
@@ -89,7 +96,7 @@ class MprisSource:
         track = (name, md.get("mpris:trackid"), title, artist)
         if track != self.track:
             self.track, self.played, self.tick = track, 0.0, None
-            self.estimated, self.zero_since = False, None
+            self.estimated, self.zero_since, self.paused_since = False, None, None
         elif self.tick and self.tick[1]:
             self.played += (now - self.tick[0]) * (self.tick[2] or 0)
         self.tick = (now, playing, rate)
@@ -112,7 +119,9 @@ class MprisSource:
         raw = dict(title=title, artist=artist, album=md.get("xesam:album") or "", playing=playing, playbackRate=rate,
                    bundleIdentifier=name[len(PREFIX):])
         elapsed = self.played * 1e6 if self.estimated else pos
-        raw.update(elapsedTimeMicros=int(elapsed), timestampEpochMicros=int(now * 1_000_000))
+        # 暂停时时间戳固定在开始暂停的时刻（rate 为 0，进度不动）：snapshot 对"0 s + 3 s 内的时间戳"会当成切歌缓冲显示在放
+        self.paused_since = None if playing else (now if self.paused_since is None else self.paused_since)
+        raw.update(elapsedTimeMicros=int(elapsed), timestampEpochMicros=int((self.paused_since or now) * 1_000_000))
         if md.get("mpris:length"):
             raw["durationMicros"] = int(md["mpris:length"])
         self.art_url = md.get("mpris:artUrl")

@@ -223,6 +223,26 @@ class Estimate(unittest.TestCase):
         clk.advance(2)
         self.assertAlmostEqual(shown(s, clk), 12.0)                 # 暂停的 60 s 不算
 
+    def test_paused_at_zero_reads_paused(self):
+        """估算模式下一开始就是暂停（累计 0 s）：3 s 后要显示暂停，不能一直当在放（snapshot 对 0 s + 新时间戳的宽限）"""
+        for pos in (None, 0):
+            s, clk = src({"x": player(status="Paused", pos=pos)})
+            s.get()
+            clk.advance(5)
+            self.assertEqual(L.snapshot(s.get(), now=clk())["state"], "paused", pos)
+
+    def test_stopped_time_not_counted(self):
+        p = player(pos=None)
+        s, clk = src({"x": p})
+        s.get()
+        clk.advance(10)
+        s.get()
+        p["PlaybackStatus"] = "Stopped"
+        self.assertIsNone(s.get())
+        clk.advance(60)
+        p["PlaybackStatus"] = "Playing"
+        self.assertAlmostEqual(shown(s, clk), 10.0)
+
     def test_real_position_clears_estimate(self):
         p = player(pos=0)
         s, clk = src({"x": p})
