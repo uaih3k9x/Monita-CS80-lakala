@@ -32,9 +32,9 @@ PLAYER = "org.mpris.MediaPlayer2.Player"
 
 def serve(addr, name, handler, ready, fds=False):
     """在自己的线程 + 连接上挂一个服务：handler(msg) -> (签名, body) 或 None（回错误）"""
-    conn = open_dbus_connection(addr, enable_fds=fds)
+    conn = open_dbus_connection(addr, **({"enable_fds": True} if fds else {}))   # jeepney 0.6 没有 enable_fds
     Proxy(message_bus, conn).RequestName(name)
-    ready.append(conn)
+    ready[name] = conn
     while True:
         try:
             msg = conn.receive()
@@ -64,7 +64,7 @@ class LiveBus(unittest.TestCase):
         cls.addr = cls.daemon.stdout.readline().strip()
         cls.calls = []
         cls.status = "Playing"
-        ready = []
+        ready = {}
 
         def mpris(msg):
             f = msg.header.fields
@@ -95,7 +95,10 @@ class LiveBus(unittest.TestCase):
         end = time.time() + 5
         while len(ready) < 2 and time.time() < end:
             time.sleep(0.02)
-        cls.login_conn = [c for c in ready][-1]
+        if "org.mpris.MediaPlayer2.fakeplayer.instance7" not in ready:
+            cls.tearDownClass()                          # setUpClass 失败时 tearDownClass 不会被调，别把 dbus-daemon 留成孤儿
+            raise unittest.SkipTest("私有 dbus-daemon 上挂不上假播放器")
+        cls.login_conn = ready.get("org.freedesktop.login1")   # jeepney < 0.7 不能传 fd，挂不上假 login1
 
     @classmethod
     def tearDownClass(cls):
@@ -123,6 +126,8 @@ class LiveBus(unittest.TestCase):
 
     def test_logind_inhibit_fd_and_signal(self):
         from monita_linux.system.power import Logind
+        if self.login_conn is None:
+            self.skipTest("jeepney < 0.7：不能传 fd，logind 休眠不可用（README 写了要 ≥ 0.7）")
         lg = Logind(self.bus(enable_fds=True), listen_bus=self.bus)
         if not lg.take_inhibitor():
             self.skipTest("这台机器的 dbus-daemon 不支持传 fd")

@@ -17,6 +17,29 @@ class Unvariant(unittest.TestCase):
         self.assertEqual(unvariant("x", 5), 5)
 
 
+class OldJeepney(unittest.TestCase):
+    def test_session_bus_does_not_pass_enable_fds(self):
+        # jeepney 0.6（Debian 11）的 open_dbus_connection 没有 enable_fds：会话总线不需要传 fd，就别传，MPRIS 照样能用
+        import sys
+        import types
+        from monita_linux.system.dbus import JeepneyBus
+        got = []
+        mod = types.ModuleType("jeepney.io.blocking")
+        mod.open_dbus_connection = lambda bus="SESSION": got.append(bus) or object()
+        saved = {k: sys.modules.get(k) for k in ("jeepney", "jeepney.io", "jeepney.io.blocking")}
+        sys.modules.update({"jeepney": types.ModuleType("jeepney"), "jeepney.io": types.ModuleType("jeepney.io"),
+                            "jeepney.io.blocking": mod})
+        try:
+            JeepneyBus("SESSION")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+        self.assertEqual(got, ["SESSION"])
+
+
 class FakeFd:
     def __init__(self, n):
         self.n = n

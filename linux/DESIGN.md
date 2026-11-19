@@ -376,13 +376,12 @@ class Volume:               # Wpctl 或 Pactl，启动时按 which 选择
 ```ini
 [Unit]
 Description=Monita-CS80 副屏上位机
-PartOf=graphical-session.target
-After=graphical-session.target
 
 [Service]
 ExecStart=%h/.local/share/monita-cs80/linux/monita-cs80-linux --device usb
 Restart=on-failure
 RestartSec=3
+RestartPreventExitStatus=2
 
 [Install]
 WantedBy=default.target
@@ -525,3 +524,6 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0901", ENV{ID_USB_
 - **`MprisLyrics`** 是 `lyrics.Lyrics` 的子类：`_fallback()` 改成直接"未在播放"（不去翻网易云 Mac 客户端的播放缓存），`payload()` 把 `source` / `estimated` 改成 MPRIS 的实际情况。
 - **测试文件**：`test_volume` / `test_stats` / `test_power` 合成一个 `test_system.py`；另加 `test_packaging.py`（单元 / 规则的几条硬约束）和 `test_dbus_live.py`（有 jeepney + dbus-daemon 时起一个私有 dbus-daemon，走真 D-Bus 线协议测 MprisSource / Logind，包括 Inhibit 的 fd 传递）。
 - **`test_fwsim.py`** 四种配置各起一个子进程并行跑（HELLO 的时区是进程级的，子进程里各用 `CONFIGS` 的 zone），约 30 s；做过变异检查：去掉 keepalive、先关 fd 再发 SLEEP、不按 generation 推整帧、睡着时写字节，各自都会被抓到。
+- **完整性检查补的几处**（都先写了测试）：Pillow < 9.0 的 `ImageDraw.polygon` 没有 `width`（Debian 11 是 8.1.2），`Canvas.polygon` 退回"填充 + 闭合折线描边"；
+  jeepney 0.6 的 `open_dbus_connection` 没有 `enable_fds`，会话总线不再传这个参数（MPRIS 能用，logind 仍要 ≥ 0.7）；
+  打不开 USB 报 EACCES 时提示装 udev 规则；§6 的单元示例和 `packaging/` 里的实际文件对齐（去掉 `PartOf=graphical-session.target`，加 `RestartPreventExitStatus=2`）。

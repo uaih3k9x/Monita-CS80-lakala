@@ -25,7 +25,8 @@ class JeepneyBus:
     def __init__(self, bus="SESSION", timeout=DEFAULT_TIMEOUT, enable_fds=False):
         from jeepney.io.blocking import open_dbus_connection
         self.timeout = timeout
-        self.conn = open_dbus_connection(bus=bus, enable_fds=enable_fds)
+        # 只在要传 fd 时才带 enable_fds：jeepney 0.6（Debian 11）没有这个参数，会话总线照样能连（logind 那条要 ≥ 0.7）
+        self.conn = open_dbus_connection(bus=bus, **({"enable_fds": True} if enable_fds else {}))
 
     def _send(self, msg):
         from jeepney import DBusErrorResponse

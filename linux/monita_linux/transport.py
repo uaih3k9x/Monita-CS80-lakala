@@ -97,8 +97,8 @@ def _find_usb():
     return usb.core.find(idVendor=VID, idProduct=PID)
 
 
-def open_device(spec, find=_find_usb, open_tty=ml.open_port):
-    """打开设备；找不到返回 None（调用方 2 s 后重试）。claim 失败（EBUSY 等）抛 OSError，带提示"""
+def open_device(spec, find=_find_usb, open_tty=ml.open_port, make_port=UsbPort):
+    """打开设备；找不到返回 None（调用方 2 s 后重试）。claim 失败（EBUSY / EACCES 等）抛 OSError，带提示"""
     kind, arg = parse_spec(spec)
     if kind == "tty":
         return open_tty(arg)
@@ -106,8 +106,11 @@ def open_device(spec, find=_find_usb, open_tty=ml.open_port):
     if dev is None:
         return None
     try:
-        return UsbPort(dev, intf=arg)
+        return make_port(dev, intf=arg)
     except OSError as e:
-        if getattr(e, "errno", None) == 16:
-            raise OSError(16, "接口 %d 被内核驱动或别的程序占用，试 --device /dev/monita-cs80（%s）" % (arg, e)) from e
+        if getattr(e, "errno", None) == errno.EBUSY:
+            raise OSError(errno.EBUSY, "接口 %d 被内核驱动或别的程序占用，试 --device /dev/monita-cs80（%s）" % (arg, e)) from e
+        if getattr(e, "errno", None) == errno.EACCES:
+            raise OSError(errno.EACCES, "没有权限打开 USB 设备：装 linux/packaging/70-monita-cs80.rules 后拔插一次（见 README"
+                                        "「systemd --user 和 udev」）（%s）" % e) from e
         raise

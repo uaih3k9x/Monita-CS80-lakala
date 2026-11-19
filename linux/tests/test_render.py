@@ -66,6 +66,21 @@ class Rgb565(unittest.TestCase):
         self.assertEqual(CV.to_rgb565(img), ml.rgb888_to_rgb565(raw))
 
 
+class OldPillow(unittest.TestCase):
+    def test_polygon_outline_without_width_kwarg(self):
+        # Pillow < 9.0（Debian 11 是 8.1.2）的 ImageDraw.polygon 没有 width 参数：要能退回去画，描边照样有
+        from PIL import ImageDraw
+        cv = CV.Canvas(20, 20, None)
+
+        class Old(ImageDraw.ImageDraw):
+            def polygon(self, xy, fill=None, outline=None):
+                super().polygon(xy, fill=fill, outline=outline)
+        cv.d = Old(cv.img)
+        cv.polygon([(2, 2), (17, 2), (17, 17), (2, 17)], fill=(10, 10, 10), stroke=(200, 0, 0), lw=3)
+        self.assertEqual(cv.img.getpixel((10, 10)), (10, 10, 10))
+        self.assertEqual(cv.img.getpixel((3, 10)), (200, 0, 0))     # 3 px 宽的描边，第二列也是描边色
+
+
 class PanelCells(unittest.TestCase):
     def test_dash_when_missing(self):
         self.assertEqual([c[0] for c in panel_cells({})], ["–"] * 4)
@@ -144,7 +159,8 @@ class Cli(unittest.TestCase):
         out = os.path.join(tempfile.mkdtemp(), "x.png")
         sample_path = os.path.join(REPO, "mac", "Samples", "lyrics-playing.json")
         self.assertEqual(main(["--png", out, "--sample", sample_path, "--at", "40"]), 0)
-        self.assertEqual(Image.open(out).size, (800, 1280))
+        with Image.open(out) as im:
+            self.assertEqual(im.size, (800, 1280))
         self.assertEqual(main(["--png", out, "--clock"]), 0)
 
     def test_defaults(self):

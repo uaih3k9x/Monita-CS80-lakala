@@ -189,7 +189,7 @@ def scenario(cfg, renderer):
         check("diff_crc", ok and app.frame_id >= 3 and sess.generation == g0, (app.frame_id, sess.generation))
 
         lyr.data = playing(time.time() - 1, state="paused")
-        run(1.0)
+        run(1.7)                                                    # 正在播放每 1 s 读一次 + 灯每 0.5 s 一次：最坏 1.5 s 才灭
         st = sim.stat()
         check("led_off_paused", st["led_mode"] == ml.LED_OFF, st["led_mode"])
         lyr.data = playing(time.time())

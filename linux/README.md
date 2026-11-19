@@ -15,9 +15,10 @@
 
 ## 安装
 
-只要 git clone + 系统包，不打 pip / deb 包。
+只要 git clone + 系统包，不打 pip / deb 包。下面按从零开始的顺序写（先装 udev 规则再插设备，否则普通用户没权限、ModemManager 也会先抢）：
 
 ```sh
+# 1. 依赖
 # Debian / Ubuntu
 sudo apt install python3 python3-pil python3-jeepney python3-usb fonts-liberation fonts-noto-cjk
 # Fedora
@@ -25,19 +26,38 @@ sudo dnf install python3 python3-pillow python3-jeepney python3-pyusb liberation
 # Arch
 sudo pacman -S python python-pillow python-jeepney python-pyusb ttf-liberation noto-fonts-cjk
 
+# 2. 代码（放这里，systemd 单元的 ExecStart 就不用改）
 git clone <本仓库> ~/.local/share/monita-cs80
-~/.local/share/monita-cs80/linux/monita-cs80-linux --device usb -v
+cd ~/.local/share/monita-cs80
+
+# 3. udev 规则（USB 权限 + 让 ModemManager 别碰它），装完拔插一次设备
+sudo cp linux/packaging/70-monita-cs80.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+
+# 4. 先前台跑一次，看日志里出现"设备已连上"
+linux/monita-cs80-linux --device usb -v
+
+# 5. 没问题再装成 systemd --user 服务（见下文"systemd --user 和 udev"）
 ```
 
 | 依赖 | 用途 | |
 |---|---|---|
-| Python ≥ 3.9、Pillow | 渲染 | 必需 |
-| jeepney | D-Bus：MPRIS、logind | 没有就只显示时钟 / "未在播放"，不处理休眠 |
+| Python ≥ 3.9、Pillow ≥ 8.1 | 渲染 | 必需（Python 3.9 + Pillow 8.1.2 / 9.0.1 都跑过全部测试） |
+| jeepney ≥ 0.7 | D-Bus：MPRIS、logind | 没有就只显示时钟 / "未在播放"，不处理休眠；0.6（Debian 11）只有 MPRIS，不能传 fd，不处理休眠 |
 | pyusb（1.0 / 1.1+ 都行）+ libusb-1.0 | `--device usb` | 走串口 `/dev/ttyUSB*` 时不需要 |
 | pyserial | 串口 | 可选，没有就用 monita_link 自带的 termios 实现 |
-| wpctl 或 pactl | 音量键 | 有一个就行；wpctl 跑不通时自动改用 pactl；都没有时音量键只打日志 |
+| wpctl 或 pactl | 音量键 | 桌面一般自带（`wireplumber` / `pulseaudio-utils`，Fedora `pulseaudio-utils`，Arch `wireplumber` / `libpulse`）；wpctl 跑不通时自动改用 pactl；都没有时音量键只打日志 |
+| fontconfig（`fc-match`） | 找字体 | 桌面都有；没有时按常见路径找 |
 
 只依赖会话 D-Bus（MPRIS）和系统 D-Bus（logind），**不连 X11 / Wayland、不截屏**，GNOME / KDE / sway / i3 都一样。
+
+常见卡点：
+
+- 日志 "没有权限打开 USB 设备"：udev 规则没装或装完没拔插（无会话时见下文组权限那行）。
+- 日志 "接口 7 被内核驱动或别的程序占用"：试 `--device /dev/monita-cs80`。
+- 一直 "未在播放"：先 `busctl --user list | grep mpris` 看播放器有没有挂上会话总线；服务模式下还要求会话总线由 systemd 用户管理器提供
+  （`dbus-user-session` / dbus-broker，现在的发行版默认如此；老式 `dbus-launch` 起的每 X 会话总线，服务看不到）。
+- 启动就退出、退出码 2：缺中文字体，装 `fonts-noto-cjk`（或用 `--font-cjk` 指定）。
 
 ## 运行
 
@@ -85,11 +105,13 @@ monita-cs80-linux --png out.png [--sample mac/Samples/lyrics-playing.json [--at 
 示例在 [packaging/](packaging/)：
 
 ```sh
-cp linux/packaging/monita-cs80.service ~/.config/systemd/user/     # 按 clone 位置改 ExecStart
+cd ~/.local/share/monita-cs80
+mkdir -p ~/.config/systemd/user
+cp linux/packaging/monita-cs80.service ~/.config/systemd/user/     # 不是 clone 到 ~/.local/share/monita-cs80 就改 ExecStart
 systemctl --user daemon-reload && systemctl --user enable --now monita-cs80
 journalctl --user -u monita-cs80 -f
 
-sudo cp linux/packaging/70-monita-cs80.rules /etc/udev/rules.d/
+sudo cp linux/packaging/70-monita-cs80.rules /etc/udev/rules.d/  # 安装第 3 步已经装过就跳过
 sudo udevadm control --reload && sudo udevadm trigger            # 再拔插一次设备
 ```
 
@@ -100,6 +122,22 @@ sudo udevadm control --reload && sudo udevadm trigger            # 再拔插一�
 - 无会话（开了 linger、只 ssh 登录）时 `uaccess` 不生效：改用规则里注释掉的组权限那行（`plugdev`；Fedora / Arch 没有这个组，
   建一个或换成你自己的组）；走串口路径时把用户加进 `dialout`。
 - 内核的 option 驱动认不认 PID 0x0901 还没验证过：出现了 `/dev/monita-cs80` 就用 `--device /dev/monita-cs80`，否则用 `--device usb`。
+
+## 和 Mac 版的差异
+
+| | Mac 版（`mac/`） | Linux 版 |
+|---|---|---|
+| 正在播放 | MediaRemote（mediaremote-adapter） | MPRIS（会话 D-Bus）；读不到进度时按播放累计时长估算，标黄框"进度为估算" |
+| 歌词 | `tools/lyrics/lyrics.py`，取不到时翻网易云 Mac 客户端的播放缓存 | 同一份 `lyrics.py`，不翻本地客户端缓存 |
+| 查询键 | PlayPause 给"正在播放"的 App | PlayPause 给屏上显示的那个 MPRIS 播放器 |
+| 音量 | osascript，±6 | wpctl / pactl，±6%，上限 100% |
+| Front Panel 四格 | 作者自己的 agent 数据（Claude / Waiting / DSH 等）；Lock 按钮显示 Mac 防睡眠状态 | CPU / BAT / Player / Load；Lock 固定显示，不读防睡眠状态 |
+| 灯 | 播放绿灯；有 agent 在等时蓝灯闪 | 只有播放绿灯，其余灭 |
+| 休眠 | Mac 睡眠**和关显示器**都发 SLEEP | 只跟 logind 挂起；只关屏（DPMS）不发 |
+| 锁屏页 | 有（锁屏时换锁屏画面） | 没有 |
+| 换句滚动 | 450 ms COPY 滚动动画 | 直接差分推（接口留好了） |
+| 沉浸模式 | `--immersive` | 不做 |
+| 链路 | 直连 USB / 串口，另有旧 HTTP 链路 | 只有直连（pyusb / 串口），不探测接口号，接口不对手动 `usb:N` |
 
 ## 测试
 

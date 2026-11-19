@@ -191,6 +191,16 @@ class OpenDeviceTests(unittest.TestCase):
     def test_usb_not_found_returns_none(self):
         self.assertIsNone(T.open_device("usb", find=lambda: None))
 
+    def test_access_denied_hints_udev(self):
+        # 没装 udev 规则时普通用户打不开 USB 设备（libusb ACCESS → EACCES）：日志要直接说装规则
+        class Denied(FakeDev):
+            def is_kernel_driver_active(self, i):
+                raise UsbErr(13, "Access denied (insufficient permissions)")
+        with self.assertRaises(OSError) as cm:
+            T.open_device("usb", find=lambda: Denied(), make_port=lambda d, intf: port(d))
+        self.assertEqual(cm.exception.errno, 13)
+        self.assertIn("70-monita-cs80.rules", str(cm.exception))
+
     def test_tty_goes_to_open_port(self):
         seen = []
         T.open_device("/dev/ttyUSB3", open_tty=lambda p: seen.append(p) or "port")

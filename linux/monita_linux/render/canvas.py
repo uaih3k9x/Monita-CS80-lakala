@@ -125,7 +125,13 @@ class Canvas:
         self.d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill, outline=stroke, width=max(1, round(lw)) if stroke else 0)
 
     def polygon(self, pts, fill=None, stroke=None, lw=1):
-        self.d.polygon(pts, fill=fill, outline=stroke, width=max(1, round(lw)) if stroke else 0)
+        w = max(1, round(lw)) if stroke else 0
+        try:
+            self.d.polygon(pts, fill=fill, outline=stroke, width=w)
+        except TypeError:                               # Pillow < 9.0（Debian 11）：polygon 没有 width，描边改用闭合折线
+            self.d.polygon(pts, fill=fill)
+            if stroke:
+                self.d.line(list(pts) + [pts[0]], fill=stroke, width=w, joint="curve")
 
     def image(self, im, x, y, w, h):
         self.img.paste(im.convert("RGB").resize((round(w), round(h))), (round(x), round(y)))
