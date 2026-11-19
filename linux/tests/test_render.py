@@ -46,6 +46,18 @@ class Wrap(unittest.TestCase):
         self.assertTrue(CV.is_cjk("中") and CV.is_cjk("，") and not CV.is_cjk("A"))
 
 
+class FontCheck(unittest.TestCase):
+    def test_cjk_font_without_cjk_glyphs_is_error(self):
+        # fc-match 总会给个"最接近的"：没装 Noto CJK 时 CJK 那一项会落到纯拉丁字体上，中文全成豆腐块，得报错而不是默默画
+        from monita_linux.render.fonts import fc_match
+        latin = fc_match("Liberation Sans")
+        if latin is None:
+            self.skipTest("没有 fc-match")
+        with self.assertRaises(FontError) as cm:
+            find_fonts(match=lambda q: latin)
+        self.assertIn("CJK", str(cm.exception))
+
+
 class Rgb565(unittest.TestCase):
     def test_matches_reference(self):
         from PIL import Image
