@@ -644,6 +644,10 @@ def main():
     ap.add_argument("--swift", help="monita-cs80 (debug) 路径; 不给就只测 Python (+ Linux)")
     ap.add_argument("--no-linux", action="store_true", help="不跑 Linux 上位机 (linux/) 那一段")
     args = ap.parse_args()
+    if not ml.lz4_available():                                # 上位机里是可选依赖, 对拍的期望值按"装了"写
+        print("对拍要 python lz4 (RECT_LZ4 段): %s -m pip install lz4 (run.sh 用 python3 -I, 只认系统 / venv 的 site-packages)"
+              % sys.executable)
+        return 2
     fails = 0
     for cfg in CONFIGS:
         cfg["fw"] = fw_ver()

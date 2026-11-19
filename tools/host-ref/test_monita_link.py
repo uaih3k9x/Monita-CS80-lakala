@@ -171,7 +171,7 @@ class LoopPort:
 
     def __init__(self, caps=0):
         self.sent, self.rx, self.in_waiting = [], bytearray(), 0
-        self.caps, self.bad = caps, 0
+        self.caps, self.bad, self.crc = caps, 0, 0
 
     def write(self, data):
         for t, s, p in ml.Parser().feed(bytes(data)):
@@ -179,7 +179,7 @@ class LoopPort:
             if t == ml.HELLO:
                 self.rx += ml.encode(ml.HELLO_ACK, s, struct.pack("<HHHHBBHHH", 0, 11, 800, 1280, 1, 72, self.caps, 32768, 0))
                 continue
-            self.rx += ml.encode(ml.ACK, s, bytes([t, 0, 0, 0]) + struct.pack("<9I", 0, 0, 0, 0, 0, 0, self.bad, 0, 0))
+            self.rx += ml.encode(ml.ACK, s, bytes([t, 0, 0, 0]) + struct.pack("<9I", 0, 0, self.crc, 0, 0, 0, self.bad, 0, 0))
         self.in_waiting = len(self.rx)
 
     def read(self, n):
@@ -299,6 +299,16 @@ class V11Tests(unittest.TestCase):
         self.assertEqual(self.push_types(link, port), [ml.RECT] * 64)
         link.hello()
         port.bad = 0
+        self.assertEqual(self.push_types(link, port), [ml.RECT_LZ4] * 64)
+
+    def test_crc_errors_do_not_disable_lz4(self):
+        """链路上的 CRC 错 (USB 毛刺) 和 LZ4 无关: 只有 bad_param 涨了 / status ≠ 0 才暂停"""
+        port = LoopPort(caps=ml.CAP_LZ4)
+        link = ml.Link(port)
+        link.hello()
+        port.crc = 3
+        self.push_types(link, port)
+        self.assertFalse(link.lz4_off)
         self.assertEqual(self.push_types(link, port), [ml.RECT_LZ4] * 64)
 
 

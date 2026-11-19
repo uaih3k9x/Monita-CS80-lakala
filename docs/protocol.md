@@ -155,8 +155,8 @@ u8  block[]          LZ4 raw block (LZ4 Block Format, 不是 frame 格式: 没�
 - **上位机规则**（三个参考实现一样）：
   - 只在 HELLO_ACK `caps` bit8 置位时发；矩形照 RECT 的规则切（payload ≤ max_payload，整行宽 20 行一条）；
   - 每个矩形压缩后**严格小于原始的 3/4** 才发 RECT_LZ4，否则照发 RECT（小块、噪声、照片压不动）；
-  - 一批里有 RECT_LZ4 而 PRESENT 的 ACK 出错计数涨了（或 status ≠ 0）：**到下一次 HELLO 前只发 RECT**。
-    这样万一编码器 / 解码器真有不一致，"推整帧恢复"会走普通 RECT，不会一直失败。
+  - 一批里有 RECT_LZ4 而 PRESENT 的 ACK `bad_param` 涨了（或 status ≠ 0）：**到下一次 HELLO 前只发 RECT**。
+    这样万一编码器 / 解码器真有不一致，"推整帧恢复"会走普通 RECT，不会一直失败。`crc_err` / `len_err` 是链路毛刺，照常推整帧恢复，不暂停 LZ4。
   - 压缩库是可选依赖：Python（`tools/host-ref`、`linux/`）用 python `lz4`（`pip install lz4` / `python3-lz4`），没装就只发 RECT；
     Mac 用系统自带的 Compression 框架。三个上位机都可以 `--no-lz4` 关掉，用来 A/B 对比。
 
@@ -345,6 +345,8 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 | linux/docs/img/lyrics-paused.png | 79 KB | 89 KB | 106 KB | 22× |
 | 12 张平均 | | 65 KB | ≈ 80 KB | ≈ 31× |
 
+- 照片不好压：用一张照片壁纸渲染的锁屏页，64 条里 63 条刚过 3/4 门槛，线上 ≈ 1250 KB（RECT 的 60%），所以锁屏那一下只快 ~40%；
+  解锁回歌词页（UI 画面）才是上表的量级。docs/img/lock.png 是拿不到壁纸时的 CDE 锁屏框。
 - 主机压缩一整帧：liblz4 0.2–0.8 ms、Apple 0.2–0.7 ms（M 系列 Mac）；64 条都过了 3/4 门槛。
 - 线上 65 KB / 帧，按实测链路 6.4 MB/s 约 **10 ms**（RECT 整帧 2049 KB ≈ 320 ms）。
 - 解出来 99% 是 match（每帧约 1.2 万个序列、字面量约 18 KB）；offset 1 / 2（单色）占 match 字节 16–71%，其余多是 offset 1600（上一行）。
@@ -353,7 +355,9 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 - **A5 估计**（UIS8910DM 的 Cortex-A5，主频按 400–500 MHz 估；周期数是拍脑袋的数量级）：逐字节 ~5 周期 / 字节、按字 ~6 周期 / 4 字节、~40 周期 / 序列
   → 解码 8–10 ms / 帧（全逐字节的话 21–27 ms）。暂存区 → 帧缓冲的 2 MB 拷贝受 PSRAM 写带宽限制（实测 CPU / DMA 都是 ~64 MB/s）约 31 ms，
   直接解进帧缓冲也躲不开这 2 MB 写。传输约 10 ms，和解码部分交错（解码时 USB 照样往内核缓冲里收）。
-  **合计估计整帧 40–50 ms（原来 320–390 ms），没上机，等真机验证**：`cs80.py PORT bench 10 docs/img/lock.png docs/img/clock.png` 和加 `--no-lz4` 各跑一次对比。
+  **合计估计整帧 40–50 ms（原来 320–390 ms），没上机，等真机验证**。最大的未知数：暂存区（bss，在 RAM 窗口里，物理上和帧缓冲同一块 PSRAM）
+  如果 D-cache 兜不住，解码的输出也要写回 PSRAM，设备侧会再多 ~30 ms，按 40–80 ms 看。对比方法：Mac 上 `monita-cs80 --device usb --bench` 和加 `--no-lz4` 各跑一次（看"整帧"那行）；
+  有串口的系统上也可以 `cs80.py PORT bench 10 docs/img/clock.png docs/img/lyrics-playing.png` 和加 `--no-lz4`。
 - 三缓冲的老代价会露出来：整帧提交之后，**下一批**开头要把新画的那块从刚提交的那块整屏抄回（2 MB，≈ 25–35 ms，`tribuf.h`）。
   以前被 320 ms 的传输盖住，现在整帧后的第一帧差分会多这一下。
 - 和 liblz4 1.9.4 差分模糊（`bench.py --fuzz 200000`，真实条带的变异块）：结论一致 99.9%，内容从不相异；

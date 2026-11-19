@@ -3,7 +3,8 @@
 - keepalive：隔了 ≥ stale_after 秒才发下一条时先重新 HELLO（固件 ~5.1 s 没有效帧就回开机页），generation + 1；
 - HELLO_ACK 收紧：proto / 800×1280 / pixfmt 1 不符都算连接失败；
 - caps 门控：LED（bit5）、COPY（bit2）、SLEEP（bit7）、RECT_LZ4（bit8，fw v11；还要装了 python3-lz4）；
-- RECT_LZ4：每个矩形压缩后 < 3/4 才发（monita_link.rect_frame）；一批里有 RECT_LZ4 却推坏了，到下一次 HELLO 前只发 RECT；
+- RECT_LZ4：每个矩形压缩后 < 3/4 才发（monita_link.rect_frame）；一批里有 RECT_LZ4 而 bad_param 涨了（或 PRESENT status ≠ 0），
+  到下一次 HELLO 前只发 RECT（CRC 错是链路毛刺，不暂停）；
 - 只有等应答超时、IO 出错、HELLO_ACK 不合格算断开；断开就关端口，下一轮重新 open_port（USB 重新枚举后旧句柄失效）；
 - suspend() 发 SLEEP 后一个字节都不写（任何一帧都会叫醒设备）；resume() 之后第一条之前必定 HELLO。
 单线程用，不加锁。
@@ -31,6 +32,7 @@ class Session:
         self.last_sent = None
         self.retry_at = 0.0
         self.base = 0                   # PRESENT ACK 的出错计数基线（crc_err + len_err + bad_param）
+        self.base_bad = 0               # 其中 bad_param 的基线（判断要不要暂停 RECT_LZ4）
         self.key_n = 0
         self.open_err = None            # 上一次打不开设备的错（日志去重）
         self.lz4 = lz4                  # False：不发 RECT_LZ4（--no-lz4）
@@ -72,7 +74,7 @@ class Session:
             return False
         self.info, self.up, self.forced = info, True, False
         self.generation += 1
-        self.base = 0
+        self.base = self.base_bad = 0
         self.key_n = 0
         self.lz4_off = False
         return True
@@ -183,12 +185,13 @@ class Session:
             return False
         errs = a["crc_err"] + a["len_err"] + a["bad_param"]
         ok = a["status"] == ml.OK and errs == self.base
-        self.base = errs
+        lz_bad = n_lz and (a["status"] != ml.OK or a["bad_param"] != self.base_bad)
+        self.base, self.base_bad = errs, a["bad_param"]
         if not ok:
             log.info("PRESENT status=%d 出错计数 %d", a["status"], errs)
-            if n_lz:
-                self.lz4_off = True
-                log.warning("这批有 %d 条 RECT_LZ4 推坏了：到下次 HELLO 前只发普通 RECT", n_lz)
+        if lz_bad:
+            self.lz4_off = True
+            log.warning("这批有 %d 条 RECT_LZ4、设备计了 bad_param：到下次 HELLO 前只发普通 RECT", n_lz)
         return ok
 
     def poll_keys(self):

@@ -254,7 +254,7 @@ class Link:
         self.timeout = timeout
         self.lz4 = lz4                  # False: 不发 RECT_LZ4 (A/B 对比); 固件 caps 有 bit8 且装了 python lz4 才真发
         self.lz4_off = False            # 一批带 RECT_LZ4 的推坏了: 到下一次 HELLO 前只发 RECT
-        self.last_errs = 0              # 最近一条 ACK 的 crc_err + len_err + bad_param
+        self.last_bad = 0               # 最近一条 ACK 的 bad_param (RECT_LZ4 坏块计在这里; CRC 错是链路问题, 不算)
         self.last_push = None           # 上一次 push: dict(bytes, rects, lz4)
         self.seq = 0
         self.parser = Parser()
@@ -304,13 +304,13 @@ class Link:
     def call(self, ftype, payload=b"", timeout=None):
         """发一条需要应答的命令, 返回 ACK dict"""
         a = parse_ack(self.wait(ACK, self.send(ftype, payload), timeout))
-        self.last_errs = a["crc_err"] + a["len_err"] + a["bad_param"]
+        self.last_bad = a["bad_param"]
         return a
 
     def hello(self, with_time=True):
         pl = hello_payload(self.clock()) if with_time else b""
         self.info = parse_hello_ack(self.wait(HELLO_ACK, self.send(HELLO, pl)))
-        self.lz4_off, self.last_errs = False, 0          # HELLO 清了设备的计数
+        self.lz4_off, self.last_bad = False, 0           # HELLO 清了设备的计数
         if self.info["proto"] != PROTO_VER:
             warnings.warn("设备 proto_ver = %d, 这份参考实现只认 %d" % (self.info["proto"], PROTO_VER))
         return self.info
@@ -379,11 +379,11 @@ class Link:
     def push(self, fb, rects, frame_id=0, copies=()):
         """把 fb (整帧 RGB565 字节) 里这些矩形发出去, 再 PRESENT; 返回 PRESENT 的 ACK。
         RECT/COPY 不应答, 一次写进串口, 只等 PRESENT 的 ACK。copies = [(sx,sy,w,h,dx,dy)] 排在 RECT 前面。
-        fw v11: 每个矩形压缩后 < 3/4 就发 RECT_LZ4 (rect_frame)。这一批有 RECT_LZ4 而 ACK 的出错计数涨了,
-        到下一次 HELLO 前只发 RECT (编解码真不一致时, 调用方的"推整帧恢复"不会一直失败)。"""
+        fw v11: 每个矩形压缩后 < 3/4 就发 RECT_LZ4 (rect_frame)。这一批有 RECT_LZ4 而 ACK 的 bad_param 涨了 (或 status ≠ 0),
+        到下一次 HELLO 前只发 RECT (编解码真不一致时, 调用方的"推整帧恢复"不会一直失败)。CRC 错是链路毛刺, 不暂停。"""
         out = bytearray()
         lz, n_lz = self.use_lz4(), 0
-        before = self.last_errs
+        before = self.last_bad
         for c in copies:
             self.seq = (self.seq + 1) & 0xFF
             out += encode(COPY, self.seq, copy_payload(*c))
@@ -395,7 +395,7 @@ class Link:
         self.ser.write(out)
         self.last_push = dict(bytes=len(out), rects=len(rects), lz4=n_lz)
         a = self.call(PRESENT, struct.pack("<H", frame_id & 0xFFFF), timeout=30)
-        if n_lz and (a["status"] != OK or self.last_errs != before):
+        if n_lz and (a["status"] != OK or self.last_bad != before):
             self.lz4_off = True
         return a
 

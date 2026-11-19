@@ -260,10 +260,20 @@ class Lz4(unittest.TestCase):
         s.push(bytes(fb), [(0, 0, 32, 16), (32, 0, 32, 16)], 1)
         self.assertEqual(rect_types(fac.links[0]), [ml.RECT, ml.RECT_LZ4])
 
-    def test_failed_lz4_batch_disables_until_hello(self):
+    def test_crc_errors_do_not_disable_lz4(self):
+        """链路 CRC 错（USB 毛刺）和 LZ4 无关：这批算推坏了，但下一批照样压缩"""
         s, fac, clk = lz4_make()
         lk = fac.links[0]
         lk.errs = 1
+        self.assertFalse(s.push(FB, ml.full_rects(), 1))
+        lk.frames.clear()
+        self.assertTrue(s.push(FB, ml.full_rects(), 2))
+        self.assertEqual(rect_types(lk), [ml.RECT_LZ4] * 64)
+
+    def test_failed_lz4_batch_disables_until_hello(self):
+        s, fac, clk = lz4_make()
+        lk = fac.links[0]
+        lk.bad = 1
         self.assertFalse(s.push(FB, ml.full_rects(), 1))
         lk.frames.clear()
         self.assertTrue(s.push(FB, ml.full_rects(), 2))               # 恢复的整帧走普通 RECT

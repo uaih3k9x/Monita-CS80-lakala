@@ -31,6 +31,7 @@ class FakeLink:
         self.frames = []              # [(type, payload)]，按写出的顺序
         self.info_reply = dict(GOOD_INFO)
         self.errs = 0                 # 下一条 ACK 里的 crc_err
+        self.bad = 0                  # 下一条 ACK 里的 bad_param
         self.status = {}              # type -> ACK status
         self.fail = set()
         self.broken = False
@@ -54,7 +55,7 @@ class FakeLink:
         if ftype in self.fail:
             raise TimeoutError("type %#x" % ftype)
         d = dict(zip(ml.STAT_NAMES, [0] * 9))
-        d.update(for_type=ftype, status=self.status.get(ftype, 0), crc_err=self.errs)
+        d.update(for_type=ftype, status=self.status.get(ftype, 0), crc_err=self.errs, bad_param=self.bad)
         return d
 
     def ping(self):

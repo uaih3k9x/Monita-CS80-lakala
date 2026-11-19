@@ -66,6 +66,8 @@ final class DeviceLink {
     private var parser = FrameParser()
     private var seq: UInt8 = 0
     private var errBase: UInt32 = 0
+    /// 其中 bad_param 的基线：RECT_LZ4 坏块计在这里（CRC 错是链路毛刺，不暂停 LZ4）
+    private var badBase: UInt32 = 0
     private(set) var info: HelloInfo?
     /// 每次连上（HELLO 成功）+1：设备 HELLO 会把灯灭掉，LED 循环据此重发
     private var gen = 0
@@ -85,8 +87,8 @@ final class DeviceLink {
     var lz4 = true
     /// 一批带 RECT_LZ4 的推坏了：到下一次 HELLO 前只发 RECT（编解码真不一致时"推整帧恢复"不会一直失败）
     private var lz4Off = false
-    /// 上一次 push 用了几条 RECT_LZ4（bench / 对拍看）
-    private(set) var lastPushLz4 = 0
+    /// 上一次 push 用了几条 RECT_LZ4、线上多少字节（--bench 看）
+    private(set) var lastPushLz4 = 0, lastPushBytes = 0
 
     init(name: String, open: @escaping () -> LinkPort?) { self.name = name; self.open = open }
 
@@ -143,7 +145,7 @@ final class DeviceLink {
             drop("HELLO 没有应答"); return false
         }
         guard h.protoSupported, h.width == screenW, h.height == screenH, h.pixfmt == 1 else { drop("协议版本 / 屏参数不符 \(h)"); return false }
-        info = h; errBase = 0; gen += 1; lz4Off = false
+        info = h; errBase = 0; badBase = 0; gen += 1; lz4Off = false
         return true
     }
 
@@ -226,7 +228,7 @@ final class DeviceLink {
     func newErrors(_ a: AckStats) -> Bool {
         lock.lock(); defer { lock.unlock() }
         let errs = a.crcErr + a.lenErr + a.badParam
-        defer { errBase = errs }
+        defer { errBase = errs; badBase = a.badParam }
         return errs != errBase
     }
 
@@ -260,14 +262,14 @@ final class DeviceLink {
         rs += rects.filter { 8 + $0.w * $0.h * 2 <= maxP }
         let useLz4 = lz4 && !lz4Off && info.hasLZ4 && lz4Available
         let (bytes, s, nLz4) = encodeBatchLz4(rs, buf, copies: info.hasCopy ? copies : [], frameID: frameID, lz4: useLz4, seq: &seq)
-        lastPushLz4 = nLz4
+        lastPushLz4 = nLz4; lastPushBytes = bytes.count
         guard write(port, bytes) else { drop("写失败"); return false }
         guard let r = wait(type: LinkType.ack, seq: s, timeoutMs: 10_000), let a = AckStats(r) else { drop("PRESENT 没有应答"); return false }
-        defer { errBase = a.crcErr + a.lenErr + a.badParam }
+        defer { errBase = a.crcErr + a.lenErr + a.badParam; badBase = a.badParam }
         let ok = presentAckOK(a, errBase: errBase)     // 沉浸模式里 PRESENT 回 status 1
-        if !ok && nLz4 > 0 {
+        if nLz4 > 0 && (a.status != 0 || a.badParam != badBase) {
             lz4Off = true
-            log("这批有 \(nLz4) 条 RECT_LZ4 推坏了：到下次 HELLO 前只发普通 RECT")
+            log("这批有 \(nLz4) 条 RECT_LZ4、设备计了 bad_param：到下次 HELLO 前只发普通 RECT")
         }
         return ok
     }

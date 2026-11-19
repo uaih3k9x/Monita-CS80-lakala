@@ -4,6 +4,7 @@
 `monita-cs80 --conformance`）对着它各跑一遍同一套脚本（`conformance.py` / `mac/Sources/monita-cs80/Conformance.swift`），
 结果和 `expected()`（照 `docs/protocol.md` 写的）逐项比，两个上位机之间也要一样。Linux 上位机（`linux/` 的 `Session`）跑其中
 HELLO + RECT_LZ4 那一段（`linux_session`），和另外两个逐项一样。`--python-only` 不测 Swift。
+要装 python `lz4`（上位机里是可选依赖，对拍的期望值按装了写；没装直接报错退出。`run.sh` 用 `python3 -I`，装在用户目录的不算）。
 
 RECT_LZ4 段（fw v11，`lz4_section` / `Conformance.swift lz4Session`）：先 HELLO 清计数，再推 UI 整帧（每条都压）、上半噪声下半 UI 的混合帧
 （正好一半条带压缩：噪声谁也压不动，UI 谁都压得很小，所以 liblz4 和 Apple 的编码器判定一样）、塞一条 offset 0 的坏块（计 `bad_param`、屏上 CRC 不变）、
