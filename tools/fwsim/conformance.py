@@ -81,7 +81,8 @@ BAD_LZ4 = struct.pack("<HHHHI", 0, 0, 800, 20, 32000) + bytes([0x10, 0xAB, 0x00,
 
 
 def lz4_section(push, fbcrc_full, send_bad, rehello, probe):
-    """RECT_LZ4 那一段, 三个上位机一样的步骤 (Swift 版在 Conformance.swift lz4Session)。先 HELLO 清计数, 之后每步看
+    """RECT_LZ4 那一段, 三个上位机一样的步骤 (Swift 版在 Conformance.swift lz4Session)。这段推坏过一批, 之后这次连接里
+    上位机只发 RECT (后面几段的像素和计数不受影响)。先 HELLO 清计数, 之后每步看
     固件里成功的 RECT_LZ4 条数和 bad_param (Probe "lz4_*")。push(fb, full) 返回推成没有; fbcrc_full() = 屏上整帧 CRC"""
     ui, mixed = frame_ui(), frame_mixed()
     c_ui, c_mixed = zlib.crc32(ui) & 0xFFFFFFFF, zlib.crc32(mixed) & 0xFFFFFFFF
@@ -98,11 +99,11 @@ def lz4_section(push, fbcrc_full, send_bad, rehello, probe):
     send_bad()                                                         # 坏块 + 一批带 RECT_LZ4 的整帧: 这批算推坏了
     r["fail"] = push(ui, True)
     probe("lz4_fail")
-    r["recover"] = [push(mixed, True), fbcrc_full() == c_mixed]        # 上位机推整帧恢复: 到下次 HELLO 前只发 RECT
+    r["recover"] = [push(mixed, True), fbcrc_full() == c_mixed]        # 上位机推整帧恢复: 只发 RECT
     probe("lz4_recover")
     rehello()
     probe("lz4_hello2")
-    r["again"] = [push(ui, True), fbcrc_full() == c_ui]                # HELLO 之后又发 RECT_LZ4
+    r["again"] = [push(ui, True), fbcrc_full() == c_ui]                # 同一次连接、fw 没变: HELLO 之后照样只发 RECT
     probe("lz4_again")
     return r
 
@@ -476,12 +477,12 @@ def python_imm(link, push, fbcrc, a, base, probe):
     return r
 
 
-# ---- Linux 上位机 (linux/monita_linux/session.py): 走它自己的 Session.push (切条带 / caps 门控 / 推坏了暂停 LZ4) ----
+# ---- Linux 上位机 (linux/monita_linux/session.py): 走它自己的 Session.push (切条带 / caps 门控 / 推坏了关 LZ4) ----
 
 def linux_session(sim, probe, now):
     sys.path.insert(0, os.path.join(ROOT, "linux"))
     import logging
-    logging.getLogger("monita").addHandler(logging.NullHandler())   # "推坏了暂停 LZ4" 是脚本故意造的, 别刷屏
+    logging.getLogger("monita").addHandler(logging.NullHandler())   # "推坏了关 LZ4" 是脚本故意造的, 别刷屏
     logging.getLogger("monita").propagate = False
     from monita_linux.session import Session
     s = Session(lambda: ml.open_port(sim.pty), clock=lambda: now, stale_after=None)
@@ -558,7 +559,8 @@ def expected(cfg):
                        garbage=[1, 0, 0, 15],
                        half=[1, 0, 0, 18]),       # 半截帧 0.5 s 没后续就丢
         "rehello": dict(ok=True, frames=2, rx_bytes=10),
-        # fw v11 RECT_LZ4 (lz4_section): 坏块计 bad_param、屏上不动, 这一批推坏了 (fail) -> 上位机到下次 HELLO 前只发 RECT。
+        # fw v11 RECT_LZ4 (lz4_section): 坏块计 bad_param、屏上不动, 这一批推坏了 (fail) -> 上位机这次连接里只发 RECT
+        # (再 HELLO 也不恢复, lz4_again 里 0 条 RECT_LZ4; 重新打开端口 / fw 变了才再试, 见各上位机单测)。
         # 旧固件 (--no-lz4): 一条 RECT_LZ4 都不发; 脚本自己塞的坏块被当成不认识的 type (回 EUNSUP, 不计错), 每批都推成
         "lz4": dict(full=[True, True], mixed=[True, True], bad=[not lz, True], fail=not lz, recover=[True, True],
                     again=[True, True]),
@@ -569,7 +571,7 @@ def expected(cfg):
         # 再 HELLO: KEY 计数清零、灯灭; 时钟按秒走, SEG 5 s 后回本地时钟
         "sim": dict(lz4_hello=[0, 0], lz4_full=[n if lz else 0, 0], lz4_mixed=[n * 3 // 2 if lz else 0, 0],
                     lz4_bad=[n * 3 // 2, 1] if lz else [0, 0], lz4_fail=[n * 5 // 2, 2] if lz else [0, 0],
-                    lz4_recover=[n * 5 // 2, 2] if lz else [0, 0], lz4_hello2=[0, 0], lz4_again=[n if lz else 0, 0],
+                    lz4_recover=[n * 5 // 2, 2] if lz else [0, 0], lz4_hello2=[0, 0], lz4_again=[0, 0],
                     boot=dict(seg="------", clk_valid=0, led=[2, ml.LED_B, 2000, 1000, 0, True], backlight=[1, 1],
                               link_up=0, boot_live=1, boot_screen=1, asleep=0, seg_en=1),
                     hello=dict(clk=True, seg_clock=True, led=[0, True], key_n=0, link_up=1, boot_live=0),

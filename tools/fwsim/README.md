@@ -8,7 +8,7 @@ HELLO + RECT_LZ4 那一段（`linux_session`），和另外两个逐项一样。
 
 RECT_LZ4 段（fw v11，`lz4_section` / `Conformance.swift lz4Session`）：先 HELLO 清计数，再推 UI 整帧（每条都压）、上半噪声下半 UI 的混合帧
 （正好一半条带压缩：噪声谁也压不动，UI 谁都压得很小，所以 liblz4 和 Apple 的编码器判定一样）、塞一条 offset 0 的坏块（计 `bad_param`、屏上 CRC 不变）、
-坏块 + 带 RECT_LZ4 的整帧（这批推坏了）、推整帧恢复（上位机到下次 HELLO 前只发 RECT：`lz4_rects` 不涨）、再 HELLO 又发 RECT_LZ4。
+坏块 + 带 RECT_LZ4 的整帧（这批推坏了）、推整帧恢复（上位机只发 RECT：`lz4_rects` 不涨）、再 HELLO 也照样只发 RECT（同一次连接、fw 没变不恢复）。
 每步看模拟器的 `lz4_rects`（成功的 RECT_LZ4 条数）和 `bad_param`。第五种配置 `--no-lz4` 装成 v10 固件：caps 没 bit8，上位机一条都不发，
 坏块被当成不认识的 type（回 EUNSUP、不计错）。
 

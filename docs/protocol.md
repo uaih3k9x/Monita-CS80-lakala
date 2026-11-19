@@ -155,8 +155,10 @@ u8  block[]          LZ4 raw block (LZ4 Block Format, 不是 frame 格式: 没�
 - **上位机规则**（三个参考实现一样）：
   - 只在 HELLO_ACK `caps` bit8 置位时发；矩形照 RECT 的规则切（payload ≤ max_payload，整行宽 20 行一条）；
   - 每个矩形压缩后**严格小于原始的 3/4** 才发 RECT_LZ4，否则照发 RECT（小块、噪声、照片压不动）；
-  - 一批里有 RECT_LZ4 而 PRESENT 的 ACK `bad_param` 涨了（或 status ≠ 0）：**到下一次 HELLO 前只发 RECT**。
-    这样万一编码器 / 解码器真有不一致，"推整帧恢复"会走普通 RECT，不会一直失败。`crc_err` / `len_err` 是链路毛刺，照常推整帧恢复，不暂停 LZ4。
+  - 一批里有 RECT_LZ4、PRESENT 的 ACK status 0 而 `bad_param` 涨了：**这次连接里只发 RECT**——keepalive / 睡醒的 HELLO 不恢复，
+    端口重新打开（拔插、设备重新枚举）或 HELLO_ACK 的 `fw_ver` 变了才再试。这样万一编码器 / 解码器真有不一致，"推整帧恢复"会走普通 RECT，
+    也不会每次 HELLO 之后再坏一批。`crc_err` / `len_err` 是链路毛刺，照常推整帧恢复，不关 LZ4；沉浸模式里 PRESENT 回 status 1、RECT / RECT_LZ4
+    一律计 `bad_param`，那是模式不对，也不关；这批一条 RECT_LZ4 都没有时 `bad_param` 涨了不归因到 LZ4。
   - 压缩库是可选依赖：Python（`tools/host-ref`、`linux/`）用 python `lz4`（`pip install lz4` / `python3-lz4`），没装就只发 RECT；
     Mac 用系统自带的 Compression 框架。三个上位机都可以 `--no-lz4` 关掉，用来 A/B 对比。
 

@@ -66,7 +66,7 @@ final class DeviceLink {
     private var parser = FrameParser()
     private var seq: UInt8 = 0
     private var errBase: UInt32 = 0
-    /// 其中 bad_param 的基线：RECT_LZ4 坏块计在这里（CRC 错是链路毛刺，不暂停 LZ4）
+    /// 其中 bad_param 的基线：RECT_LZ4 坏块计在这里（CRC 错是链路毛刺，不关 LZ4）
     private var badBase: UInt32 = 0
     private(set) var info: HelloInfo?
     /// 每次连上（HELLO 成功）+1：设备 HELLO 会把灯灭掉，LED 循环据此重发
@@ -85,8 +85,8 @@ final class DeviceLink {
     var clock: () -> Date = { Date() }
     /// fw v11 RECT_LZ4：false = 不发（--no-lz4）；固件 caps 有 bit8 才真发
     var lz4 = true
-    /// 一批带 RECT_LZ4 的推坏了：到下一次 HELLO 前只发 RECT（编解码真不一致时"推整帧恢复"不会一直失败）
-    private var lz4Off = false
+    /// 一批带 RECT_LZ4 的推坏了就关（MonitaCore Lz4Gate）：这次连接里 fw 没变就只发 RECT（编解码真不一致时"推整帧恢复"不会一直失败）
+    private var lz4Gate = Lz4Gate()
     /// 上一次 push 用了几条 RECT_LZ4、线上多少字节（--bench 看）
     private(set) var lastPushLz4 = 0, lastPushBytes = 0
 
@@ -95,6 +95,7 @@ final class DeviceLink {
     private func drop(_ why: String) {
         if port != nil { log("设备断开：\(why)") }
         port = nil; info = nil
+        lz4Gate.reset()                                // 下次重新打开（设备可能重新枚举过）RECT_LZ4 再试
     }
 
     /// 拆帧；KEY 交给 onKey，其余原样返回
@@ -145,7 +146,7 @@ final class DeviceLink {
             drop("HELLO 没有应答"); return false
         }
         guard h.protoSupported, h.width == screenW, h.height == screenH, h.pixfmt == 1 else { drop("协议版本 / 屏参数不符 \(h)"); return false }
-        info = h; errBase = 0; badBase = 0; gen += 1; lz4Off = false
+        info = h; errBase = 0; badBase = 0; gen += 1; lz4Gate.hello(fw: h.fw)
         return true
     }
 
@@ -184,7 +185,7 @@ final class DeviceLink {
         return ok
     }
 
-    /// 马上重新 HELLO（带时间；对拍脚本用：清设备计数、恢复 RECT_LZ4）。失败就断开
+    /// 马上重新 HELLO（带时间；对拍脚本用：清设备计数。推坏后关掉的 RECT_LZ4 不恢复，同 keepalive）。失败就断开
     func rehello() -> Bool { lock.lock(); defer { lock.unlock() }; return port != nil && hello() }
 
     /// Mac 醒来：可以发了，下一条之前先重新 HELLO（connectIfNeeded 会返回 true）
@@ -260,16 +261,15 @@ final class DeviceLink {
             for y in stride(from: r.y, to: r.y + r.h, by: rows) { rs.append(LinkRect(x: r.x, y: y, w: r.w, h: min(rows, r.y + r.h - y))) }
         }
         rs += rects.filter { 8 + $0.w * $0.h * 2 <= maxP }
-        let useLz4 = lz4 && !lz4Off && info.hasLZ4 && lz4Available
+        let useLz4 = lz4 && !lz4Gate.off && info.hasLZ4 && lz4Available
         let (bytes, s, nLz4) = encodeBatchLz4(rs, buf, copies: info.hasCopy ? copies : [], frameID: frameID, lz4: useLz4, seq: &seq)
         lastPushLz4 = nLz4; lastPushBytes = bytes.count
         guard write(port, bytes) else { drop("写失败"); return false }
         guard let r = wait(type: LinkType.ack, seq: s, timeoutMs: 10_000), let a = AckStats(r) else { drop("PRESENT 没有应答"); return false }
         defer { errBase = a.crcErr + a.lenErr + a.badParam; badBase = a.badParam }
         let ok = presentAckOK(a, errBase: errBase)     // 沉浸模式里 PRESENT 回 status 1
-        if nLz4 > 0 && (a.status != 0 || a.badParam != badBase) {
-            lz4Off = true
-            log("这批有 \(nLz4) 条 RECT_LZ4、设备计了 bad_param：到下次 HELLO 前只发普通 RECT")
+        if lz4Gate.batch(nLz4: nLz4, status: a.status, badParam: a.badParam, badBase: badBase) {
+            log("这批有 \(nLz4) 条 RECT_LZ4、设备计了 bad_param：这次连接里只发普通 RECT（重新插拔 / 换固件后再试）")
         }
         return ok
     }

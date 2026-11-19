@@ -7,9 +7,12 @@ cc -std=c99 -Wall -Wextra -Werror -O1 -o "$out" test_proto.c
 # LZ4 解码器: ASan + UBSan 编, 模糊测试 (默认 30 万次; LZ4_FUZZ=N 改)
 [ $rc -eq 0 ] && cc -std=c99 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -o "$out" test_lz4.c \
   && "$out" ${LZ4_FUZZ:-300000}; rc=$?
-for t in test_zc_logic.c test_blit.c test_tribuf.c test_keys.c test_led.c test_linkwd.c test_imm.c test_dispatch.c; do
+for t in test_zc_logic.c test_blit.c test_tribuf.c test_keys.c test_led.c test_linkwd.c test_imm.c; do
   [ $rc -eq 0 ] && cc -std=c99 -Wall -Wextra -Werror -O1 -I. -o "$out" "$t" && "$out"; rc=$?
 done
+# 协议分发 (含 RECT_LZ4 落到帧缓冲): 也用 ASan + UBSan; 暂存区 / payload 缓冲按默认 max_payload 32768 精确分配, 容量检查漏了就越界
+[ $rc -eq 0 ] && cc -std=c99 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -DSIM_PL_CAP=32768u -I. \
+  -o "$out" test_dispatch.c && "$out"; rc=$?
 # 开机版权页: 字体表是否和 LaffStd.c 同步; C 画的 vs tools/bootscreen/render_ref.py 逐像素
 if [ $rc -eq 0 ]; then
   tmp=$(mktemp -d)

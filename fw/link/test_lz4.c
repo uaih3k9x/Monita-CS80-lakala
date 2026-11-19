@@ -2,7 +2,9 @@
  *   1. 手写的块: 纯字面量、重叠 match (offset 1/2/3)、长度扩展的边界 (14/15/16/18/19/270/271/…)。
  *   2. 往返: 测试里自己按 LZ4 块格式 (公开规范) 编随机序列, 解出来要逐字节一致。
  *   3. 恶意块: 偏移 0、偏移超出已解数据、各处截断、输出越界、长度扩展溢出、尾巴多字节、解出长度不对。
- *   4. 模糊测试: 合法块随机改字节 / 截断 / 插 0xFF 串 / 改偏移, 每次输入输出都按实际长度 malloc (越界一个字节 ASan 就报)。
+ *   4. 模糊测试: 合法块随机改字节 / 截断 / 插 0xFF 串 / 改偏移, 每次输入输出都按实际长度 malloc (越界一个字节 ASan 就报);
+ *      和测试里逐字节的参考解码器 (照规范直写, 不做按字拷) 比: 成功 / 失败要一致, 成功时内容逐字节一致;
+ *      输出起点轮流放在 malloc 地址 +0 / +1 / +2 / +3 (按字拷的各条对齐路径都走到)。
  *   5. RECT_LZ4 落到帧缓冲: 头校验、坏块不动帧缓冲、和同样像素的 RECT 结果一致。
  *   ./test_lz4 [模糊次数]   (默认 300000) */
 #include <stdio.h>
@@ -63,14 +65,39 @@ static void gen_block(buf_t *blk, buf_t *out, uint32_t target){
     }
 }
 
-/* 按实际长度 malloc 再解 (ASan 抓 1 字节越界) */
-static int dec(const uint8_t *src, uint32_t n, uint32_t want, uint8_t **outp){
-    uint8_t *s = malloc(n ? n : 1), *d = malloc(want ? want : 1);
+/* 按实际长度 malloc 再解 (ASan 抓 1 字节越界); 输出起点 = malloc 地址 + al (0..3, 末尾仍紧贴分配的末尾) */
+static int dec_al(const uint8_t *src, uint32_t n, uint32_t want, uint32_t al, uint8_t **outp){
+    uint8_t *s = malloc(n ? n : 1), *raw = malloc(al + want ? al + want : 1);
     memcpy(s, src, n);
-    int r = lz4_decode(s, n, d, want);
+    int r = lz4_decode(s, n, raw + al, want);
     free(s);
-    if (outp) *outp = d; else free(d);
+    if (outp){ uint8_t *o = malloc(want ? want : 1); memcpy(o, raw + al, want); *outp = o; }
+    free(raw);
     return r;
+}
+static int dec(const uint8_t *src, uint32_t n, uint32_t want, uint8_t **outp){ return dec_al(src, n, want, 0, outp); }
+
+/* 参考解码器: 照规范逐字节直写, 接受规则和 lz4_decode 一样 (offset 0 / 超出已解 / 输出越界 / 以 match 结尾都算坏,
+ * 输入正好用完在字面量之后且输出正好 want 才算成功)。size_t 记长度 (主机上不会回绕), 不做任何按字拷。0 = 成功 */
+static int ref_decode(const uint8_t *s, size_t n, uint8_t *d, size_t want){
+    size_t ip = 0, op = 0;
+    for (;;){
+        if (ip >= n) return -1;
+        unsigned tok = s[ip++]; size_t len = tok >> 4;
+        if (len == 15){ unsigned b; do { if (ip >= n) return -1; b = s[ip++]; len += b; } while (b == 255); }
+        if (len > want - op || len > n - ip) return -1;
+        for (size_t i = 0; i < len; i++) d[op + i] = s[ip + i];
+        op += len; ip += len;
+        if (ip == n) return op == want ? 0 : -1;
+        if (n - ip < 2) return -1;
+        size_t off = (size_t)s[ip] | ((size_t)s[ip + 1] << 8); ip += 2;
+        if (off == 0 || off > op) return -1;
+        len = tok & 15u;
+        if (len == 15){ unsigned b; do { if (ip >= n) return -1; b = s[ip++]; len += b; } while (b == 255); }
+        len += 4;
+        if (len > want - op) return -1;
+        for (size_t i = 0; i < len; i++, op++) d[op] = d[op - off];
+    }
 }
 
 static void test_vectors(void){
@@ -121,6 +148,10 @@ static void test_vectors(void){
     CHECK(dec(big, sizeof big, 32000, 0) == LZ4_E_OVER);
     big[0] = 0x1F; big[1] = 'a'; big[2] = 1; big[3] = 0;
     CHECK(dec(big, sizeof big, 32000, 0) == LZ4_E_OVER);
+    /* 长度扩展"不回绕"的前提: 输出上限 ≤ 0xFFFFFF00 (len ≤ lim 时再加一个字节 ≤ 255 不会过 2^32)。更大的 want 入口就拒 */
+    CHECK(lz4_decode(z, 1, 0, 0xFFFFFF01u) == LZ4_E_OVER);
+    CHECK(lz4_decode(z, 1, 0, 0xFFFFFFFFu) == LZ4_E_OVER);
+    CHECK(lz4_decode(z, 1, 0, 0xFFFFFF00u) == LZ4_E_SIZE);     /* 上限本身照常解 (这里解出 0 字节 != want) */
 }
 
 /* 长度扩展边界: 字面量 / match 长度各取 0..20、250..280、510..530, 两两组合往返 */
@@ -149,12 +180,38 @@ static void test_len_edges(void){
     printf("  len edges: %u cases\n", cases);
 }
 
+/* 按字拷的对齐路径: offset 1..9 / 12 / 16 / 17 / 31..33 / 1599..1601, match 长度 4..80, 前面 0..7 个多余字面量, 输出起点 +0..3 */
+static void test_align_matrix(void){
+    static const uint32_t offs[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16, 17, 31, 32, 33, 1599, 1600, 1601 };
+    buf_t blk = {0}, out = {0};
+    static uint8_t lit[1700], ref[1700 + 80 + 3];
+    for (uint32_t i = 0; i < sizeof lit; i++) lit[i] = (uint8_t)(i * 37 + 11);
+    uint32_t cases = 0; int f0 = fails;
+    for (uint32_t oi = 0; oi < sizeof offs / sizeof offs[0]; oi++)
+    for (uint32_t pre = 0; pre < 8; pre++)
+    for (uint32_t ml = 4; ml <= 80; ml++)
+    for (uint32_t al = 0; al < 4; al++){
+        blk.n = out.n = 0;
+        emit(&blk, &out, lit, offs[oi] + pre, offs[oi], ml);
+        emit(&blk, &out, lit, 3, 0, 0);
+        CHECK(ref_decode(blk.b, blk.n, ref, out.n) == 0 && !memcmp(ref, out.b, out.n));
+        uint8_t *o;
+        CHECK(dec_al(blk.b, blk.n, out.n, al, &o) == LZ4_OK && !memcmp(o, out.b, out.n));
+        free(o);
+        cases++;
+        if (fails != f0) goto done;
+    }
+done:
+    free(blk.b); free(out.b);
+    printf("  align matrix: %u cases\n", cases);
+}
+
 static void test_roundtrip(uint32_t n){
     buf_t blk = {0}, out = {0};
     for (uint32_t k = 0; k < n; k++){
         gen_block(&blk, &out, rndn(k % 10 == 0 ? 32000 : 3000));
         uint8_t *o;
-        int r = dec(blk.b, blk.n, out.n, &o);
+        int r = dec_al(blk.b, blk.n, out.n, k & 3u, &o);
         CHECK(r == LZ4_OK && !memcmp(o, out.b, out.n));
         free(o);
         if (fails) break;
@@ -163,11 +220,11 @@ static void test_roundtrip(uint32_t n){
     printf("  roundtrip: %u random blocks\n", n);
 }
 
-/* 模糊: 改合法块。不崩、不越界 (ASan); 解码成功时输出长度必然 = want (函数契约) */
+/* 模糊: 改合法块。不崩、不越界 (ASan); 成功 / 失败和参考解码器一致, 成功时内容一致; 输出起点轮流错开 0..3 字节 */
 static void test_fuzz(uint32_t n){
     buf_t blk = {0}, out = {0};
     uint32_t ok = 0, err[5] = {0};
-    uint8_t *m = 0; uint32_t mcap = 0;
+    uint8_t *m = 0, *ref = 0; uint32_t mcap = 0, rcap = 0;
     for (uint32_t k = 0; k < n; k++){
         if (k % 64 == 0) gen_block(&blk, &out, 1 + rndn(k % 640 == 0 ? 20000 : 1500));
         uint32_t len = blk.n;
@@ -185,10 +242,17 @@ static void test_fuzz(uint32_t n){
         case 6: { uint32_t e = rndn(16); for (uint32_t i = 0; i < e; i++) m[len + i] = (uint8_t)rnd(); len += e; break; }   /* 尾巴多字节 */
         default: m[rndn(len)] = 0xFF; break;
         }
-        int r = dec(m, len, want, 0);
+        uint8_t *o;
+        int r = dec_al(m, len, want, k & 3u, &o);
+        if (rcap < want + 1){ rcap = want + 1; ref = realloc(ref, rcap); }
+        int rr = ref_decode(m, len, ref, want);
+        CHECK((r == LZ4_OK) == (rr == 0));                 /* 和逐字节参考解码器判得一样 */
+        if (r == LZ4_OK && rr == 0) CHECK(!memcmp(o, ref, want));   /* 成功时内容一致 */
+        free(o);
         if (r == LZ4_OK) ok++; else if (r > 0 && r < 5) err[r]++; else { CHECK(0 && "未知返回值"); break; }
+        if (fails > 20) break;
     }
-    free(m); free(blk.b); free(out.b);
+    free(m); free(ref); free(blk.b); free(out.b);
     printf("  fuzz: %u mutated blocks: ok %u, trunc %u, over %u, off %u, size %u\n", n, ok, err[1], err[2], err[3], err[4]);
     CHECK(err[1] && err[2] && err[3] && err[4]);       /* 每类错误都被触发过 */
 }
@@ -281,6 +345,7 @@ int main(int argc, char **argv){
     uint32_t n = argc > 1 ? (uint32_t)strtoul(argv[1], 0, 10) : 300000u;
     test_vectors();
     test_len_edges();
+    test_align_matrix();
     test_roundtrip(20000);
     test_fuzz(n);
     test_random_bytes(n / 3);

@@ -162,7 +162,7 @@ func runConformance(_ link: DeviceLink) -> Bool {
     return true
 }
 
-/// 同 conformance.py lz4_section：先 HELLO 清计数；坏块计 bad_param、屏上不动；推坏了之后到下次 HELLO 前只发 RECT
+/// 同 conformance.py lz4_section：先 HELLO 清计数；坏块计 bad_param、屏上不动；推坏了之后这次连接里只发 RECT（再 HELLO 也不恢复）
 private func lz4Session(_ link: DeviceLink, fbcrc: (Int, Int, Int, Int) -> AckStats) -> [String: Any] {
     var ui = [UInt16](repeating: 0, count: screenW * screenH), mixed = ui
     for y in 0..<screenH { for x in 0..<screenW { ui[y * screenW + x] = patUI(x, y); mixed[y * screenW + x] = y < 640 ? patNoise(x, y) : patUI(x, y) } }

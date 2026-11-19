@@ -61,3 +61,37 @@ private let liblz4Raw: [UInt8] = Array([[UInt8]](repeating: [0x34, 0x12], count:
 private extension FrameParser {
     func feedAll(_ b: [UInt8]) -> [LinkFrame] { var p = self; return p.feed(b) }
 }
+
+/// 推坏了一批 RECT_LZ4 之后：同一次连接、fw 没变就一直关着（keepalive HELLO 不恢复）；重新打开端口或换了 fw 再试
+@Test func lz4GateStaysOffUntilReopenOrFwChange() {
+    var g = Lz4Gate()
+    g.hello(fw: 11)
+    #expect(!g.off)
+    let r1 = g.batch(nLz4: 64, status: 0, badParam: 1, badBase: 0)
+    #expect(r1)      // 这次刚关
+    #expect(g.off)
+    let r2 = g.batch(nLz4: 0, status: 0, badParam: 1, badBase: 1)
+    #expect(!r2)      // 已经关了
+    g.hello(fw: 11)                                                     // keepalive / 睡醒
+    #expect(g.off)
+    g.hello(fw: 12)                                                     // 刷了别的固件
+    #expect(!g.off)
+    _ = g.batch(nLz4: 1, status: 0, badParam: 2, badBase: 1)
+    #expect(g.off)
+    g.reset()                                                           // 端口关了 / 重新枚举
+    g.hello(fw: 12)
+    #expect(!g.off)
+}
+
+/// 只归因到 LZ4：这批确实有 RECT_LZ4、PRESENT status 0（沉浸模式里回 1 是模式不对）、bad_param 涨了（CRC 错不算）
+@Test func lz4GateAttribution() {
+    var g = Lz4Gate()
+    g.hello(fw: 11)
+    let r3 = g.batch(nLz4: 64, status: 1, badParam: 64, badBase: 0)
+    #expect(!r3)    // 沉浸模式
+    let r4 = g.batch(nLz4: 0, status: 0, badParam: 1, badBase: 0)
+    #expect(!r4)      // 这批全是 RECT
+    let r5 = g.batch(nLz4: 64, status: 0, badParam: 0, badBase: 0)
+    #expect(!r5)     // 只有 CRC 错之类（不在 bad_param 里）
+    #expect(!g.off)
+}

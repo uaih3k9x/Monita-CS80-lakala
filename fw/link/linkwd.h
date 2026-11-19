@@ -25,6 +25,16 @@
 #define LW_SLEEP   4
 #define LW_WOKE    8
 
+/* 喂硬件看门狗 (ql_dev_feed_wdt) 的节拍: 距上次超过 WDT_FEED_US 微秒就该喂了, 顺手记下这次。u32 微秒, 允许回绕。
+ * fw/app.c 主循环里内外两层都调: 主机一直在写时内层 ql_uart_read 循环可以很久不退出 (RECT_LZ4 每个线上字节在设备上
+ * 要解出几十倍、再拷进帧缓冲), 只在外层喂会饿着狗 */
+#define WDT_FEED_US 1000000u
+static inline int wdt_due(uint32_t *last, uint32_t now_us){
+    if (now_us - *last <= WDT_FEED_US) return 0;
+    *last = now_us;
+    return 1;
+}
+
 typedef struct { uint8_t hello, up, asleep; uint32_t last, lost_ms, sleep_ms; } lw_t;
 
 /* now: 开机时刻 (没人连时自动休眠从这里算) */

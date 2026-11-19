@@ -14,6 +14,31 @@ public var lz4Available: Bool {
     #endif
 }
 
+/// RECT_LZ4 的开关（三个上位机同一语义，Python 版 tools/host-ref/monita_link.py lz4_batch_bad）：
+/// 一批确实有 RECT_LZ4、PRESENT status 0（沉浸模式里 RECT / RECT_LZ4 一律被拒、PRESENT 回 1，那是模式不对）、
+/// bad_param 比基线涨了（RECT_LZ4 坏块计在这里；CRC 错是链路毛刺，不算）就关。关了之后同一次连接里 fw 没变就一直关着：
+/// keepalive / 睡醒的 HELLO 不恢复（编解码真不一致时不会每次 HELLO 后再坏一批）；端口重新打开（reset）或 HELLO 报的 fw 变了才再试
+public struct Lz4Gate {
+    /// 关掉时设备的 fw；nil = 开着
+    public private(set) var offFw: Int?
+    private var fw: Int?
+    public init() {}
+    public var off: Bool { offFw != nil }
+    /// HELLO 成功
+    public mutating func hello(fw f: Int) {
+        fw = f
+        if offFw != f { offFw = nil }
+    }
+    /// 端口关了（下次重新打开 = 设备可能重新枚举过）
+    public mutating func reset() { offFw = nil; fw = nil }
+    /// 一批推完（PRESENT 的 ACK）；返回 true = 这次刚关掉
+    public mutating func batch(nLz4: Int, status: UInt8, badParam: UInt32, badBase: UInt32) -> Bool {
+        guard !off, nLz4 > 0, status == 0, badParam != badBase else { return false }
+        offFw = fw ?? -1
+        return true
+    }
+}
+
 /// 压缩后严格小于原始的 3/4 才值得发 RECT_LZ4（三个上位机同一条规则）
 public func lz4Worth(_ compressed: Int, _ raw: Int) -> Bool { compressed * 4 < raw * 3 }
 
@@ -59,7 +84,7 @@ public func rectFrame(_ r: LinkRect, _ buf: [UInt16], width: Int = screenW, lz4:
     return (LinkType.rectLZ4, out + c)
 }
 
-/// encodeBatch 的 RECT_LZ4 版：多返回这一批用了几条 RECT_LZ4（推坏了且 > 0 时调用方暂停 LZ4 到下次 HELLO）
+/// encodeBatch 的 RECT_LZ4 版：多返回这一批用了几条 RECT_LZ4（推坏了且 > 0 时调用方关 LZ4，见 Lz4Gate）
 public func encodeBatchLz4(_ rects: [LinkRect], _ buf: [UInt16], width: Int = screenW, copies: [LinkCopy] = [],
                            frameID: Int, lz4: Bool, seq: inout UInt8) -> ([UInt8], UInt8, Int) {
     var out: [UInt8] = []

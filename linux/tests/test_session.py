@@ -220,7 +220,7 @@ def rect_types(lk):
 
 @unittest.skipUnless(ml.lz4_available(), "没装 python lz4")
 class Lz4(unittest.TestCase):
-    """fw v11 RECT_LZ4：caps bit8 才发；压缩后 < 3/4 才发；推坏了到下次 HELLO 前只发 RECT"""
+    """fw v11 RECT_LZ4：caps bit8 才发；压缩后 < 3/4 才发；推坏了就关，同一次连接、fw 没变不再开"""
 
     def test_full_frame_compressed_and_decodes_back(self):
         import lz4.block
@@ -270,7 +270,9 @@ class Lz4(unittest.TestCase):
         self.assertTrue(s.push(FB, ml.full_rects(), 2))
         self.assertEqual(rect_types(lk), [ml.RECT_LZ4] * 64)
 
-    def test_failed_lz4_batch_disables_until_hello(self):
+    def test_failed_lz4_batch_stays_off_until_reopen_or_fw_change(self):
+        """推坏了一批 RECT_LZ4：同一次连接、fw 没变就一直只发 RECT——keepalive / 睡醒的 HELLO 不恢复；
+        端口重新打开（设备重新枚举）或 fw 变了才再试"""
         s, fac, clk = lz4_make()
         lk = fac.links[0]
         lk.bad = 1
@@ -278,10 +280,62 @@ class Lz4(unittest.TestCase):
         lk.frames.clear()
         self.assertTrue(s.push(FB, ml.full_rects(), 2))               # 恢复的整帧走普通 RECT
         self.assertEqual(rect_types(lk), [ml.RECT] * 64)
-        s.suspend(); s.resume()                                        # 下一条之前重新 HELLO
+        lk.bad = 0                                                     # 设备 HELLO 时清计数
+        clk.advance(4.0)                                               # 3.5 s 没发：keepalive HELLO
+        lk.frames.clear()
+        self.assertTrue(s.push(FB, ml.full_rects(), 3) is False)       # 刚重新 HELLO：调用方推整帧
+        self.assertTrue(s.push(FB, ml.full_rects(), 4))
+        self.assertIn(ml.HELLO, lk.types())
+        self.assertEqual(rect_types(lk), [ml.RECT] * 64)
+        s.suspend(); s.resume()                                        # 睡醒的 HELLO 也不恢复
         self.assertTrue(s.connect_if_needed())
         lk.frames.clear()
-        s.push(FB, ml.full_rects(), 3)
+        s.push(FB, ml.full_rects(), 5)
+        self.assertEqual(rect_types(lk), [ml.RECT] * 64)
+        lk.info_reply["fw"] += 1                                       # fw 变了（刷了新固件）：再试
+        s.suspend(); s.resume()
+        self.assertTrue(s.connect_if_needed())
+        lk.frames.clear()
+        s.push(FB, ml.full_rects(), 6)
+        self.assertEqual(rect_types(lk), [ml.RECT_LZ4] * 64)
+
+    def test_reopen_reenables_lz4(self):
+        s, fac, clk = lz4_make()
+        fac.links[0].bad = 1
+        s.push(FB, ml.full_rects(), 1)
+        fac.links[0].broken = True                                     # 拔线 / 重新枚举
+        self.assertIsNone(s.ping())
+        clk.advance(2.1)
+        self.assertTrue(s.connect_if_needed())
+        lk = fac.links[1]
+        s.push(FB, ml.full_rects(), 2)
+        self.assertEqual(rect_types(lk), [ml.RECT_LZ4] * 64)
+
+    def test_immersive_present_reject_does_not_disable_lz4(self):
+        """沉浸模式里 RECT / RECT_LZ4 一律计 bad_param、PRESENT 回 status 1：模式不对，不是编解码坏了"""
+        s, fac, clk = lz4_make()
+        lk = fac.links[0]
+        lk.bad, lk.status[ml.PRESENT] = 64, ml.EPARAM
+        self.assertFalse(s.push(FB, ml.full_rects(), 1))
+        lk.bad, lk.status = 64, {}
+        lk.frames.clear()
+        self.assertTrue(s.push(FB, ml.full_rects(), 2))
+        self.assertEqual(rect_types(lk), [ml.RECT_LZ4] * 64)
+
+    def test_bad_param_in_rect_only_batch_does_not_disable_lz4(self):
+        s, fac, clk = lz4_make()
+        lk = fac.links[0]
+        fb = bytearray(FB)
+        x = 1
+        for i in range(32 * 16 * 2):                                   # 第一个 tile 是噪声：这批只有 RECT
+            x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+            r, c = divmod(i, 64)
+            fb[r * 1600 + c] = x >> 16 & 0xFF
+        lk.bad = 1
+        self.assertFalse(s.push(bytes(fb), [(0, 0, 32, 16)], 1))
+        self.assertEqual(rect_types(lk), [ml.RECT])
+        lk.frames.clear()
+        self.assertTrue(s.push(FB, ml.full_rects(), 2))
         self.assertEqual(rect_types(lk), [ml.RECT_LZ4] * 64)
 
 

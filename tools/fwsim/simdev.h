@@ -37,7 +37,9 @@
 #define PORT          4u
 #define KEY_SAMPLE_MS 8u
 #define REPLY_MAX     68u
-#define SIM_PL_CAP    65535u
+#ifndef SIM_PL_CAP
+#define SIM_PL_CAP    65535u           /* g_pl / g_lz 的大小 = --max-payload 上限; fw/link/test.sh 编单测时 -D 成 32768 (= 默认 max_payload, 暂存区不留富余) */
+#endif
 
 /* ---- 可调 (fwsim 的命令行参数) ---- */
 static uint32_t sim_max_payload = 32768u;   /* HELLO_ACK.max_payload 和拆帧上限 */
@@ -71,6 +73,8 @@ static void ql_uart_write(uint32_t port, const uint8_t *p, uint32_t n){ (void)po
 /* ---- dispatch.h 要的状态 ---- */
 static uint8_t  g_pl[SIM_PL_CAP] __attribute__((aligned(4)));
 static uint8_t  g_lz[SIM_PL_CAP] __attribute__((aligned(4)));   /* RECT_LZ4 暂存区 (同 app.c) */
+/* dispatch.h 按 MAX_PAYLOAD (= sim_max_payload, 运行时可调) 当暂存区容量: 只能静态保证到 SIM_PL_CAP, 运行时上限 sim_init 里查 */
+_Static_assert(sizeof g_lz >= SIM_PL_CAP && sizeof g_pl >= SIM_PL_CAP, "g_lz / g_pl 至少 SIM_PL_CAP");
 static uint8_t  g_tx[64];
 static lk_parser_t g_p;
 static struct { uint32_t rx_bytes, rects, presents, bad_param, lz4; } st;
@@ -326,7 +330,8 @@ static void sim_init(void){
     sim.seg_en = 1;
     led_init(&g_led); led_default(); led_poll();
     keys_init(&g_keys); pwr_init(&g_pwr); lw_init(&g_lw, now_ms());
-    lk_init(&g_p, g_pl, sim_max_payload > SIM_PL_CAP ? SIM_PL_CAP : sim_max_payload);
+    if (sim_max_payload > SIM_PL_CAP) sim_max_payload = SIM_PL_CAP;   /* 拆帧上限和 RECT_LZ4 暂存区容量都不超过数组 */
+    lk_init(&g_p, g_pl, sim_max_payload);
     sim_last_rx = now_us();
 }
 static void sim_rx(const uint8_t *d, uint32_t n){

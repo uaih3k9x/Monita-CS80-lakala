@@ -167,19 +167,20 @@ class V9Tests(unittest.TestCase):
 
 
 class LoopPort:
-    """假串口: 写进来的帧原样记下, 每条回一个 ACK (status 0; bad_param = self.bad); HELLO 回 HELLO_ACK (caps = self.caps)"""
+    """假串口: 写进来的帧原样记下, 每条回一个 ACK (status = self.status.get(type, 0); bad_param = self.bad);
+    HELLO 回 HELLO_ACK (fw = self.fw, caps = self.caps)"""
 
     def __init__(self, caps=0):
         self.sent, self.rx, self.in_waiting = [], bytearray(), 0
-        self.caps, self.bad, self.crc = caps, 0, 0
+        self.caps, self.bad, self.crc, self.fw, self.status = caps, 0, 0, 11, {}
 
     def write(self, data):
         for t, s, p in ml.Parser().feed(bytes(data)):
             self.sent.append((t, p))
             if t == ml.HELLO:
-                self.rx += ml.encode(ml.HELLO_ACK, s, struct.pack("<HHHHBBHHH", 0, 11, 800, 1280, 1, 72, self.caps, 32768, 0))
+                self.rx += ml.encode(ml.HELLO_ACK, s, struct.pack("<HHHHBBHHH", 0, self.fw, 800, 1280, 1, 72, self.caps, 32768, 0))
                 continue
-            self.rx += ml.encode(ml.ACK, s, bytes([t, 0, 0, 0]) + struct.pack("<9I", 0, 0, self.crc, 0, 0, 0, self.bad, 0, 0))
+            self.rx += ml.encode(ml.ACK, s, bytes([t, self.status.get(t, 0), 0, 0]) + struct.pack("<9I", 0, 0, self.crc, 0, 0, 0, self.bad, 0, 0))
         self.in_waiting = len(self.rx)
 
     def read(self, n):
@@ -288,8 +289,9 @@ class V11Tests(unittest.TestCase):
         link3.hello()
         self.assertEqual(self.push_types(link3, link3.ser), [ml.RECT] * 64)
 
-    def test_failed_lz4_batch_disables_until_hello(self):
-        """一批里有 RECT_LZ4 而 PRESENT 的 ACK 出错计数涨了: 到下一次 HELLO 前都只发 RECT (防编解码不一致时整帧重试死循环)"""
+    def test_failed_lz4_batch_stays_off_until_fw_changes(self):
+        """一批里有 RECT_LZ4 而 PRESENT 的 ACK 里 bad_param 涨了: 这个 Link (= 这次打开的端口) 里、fw 没变就一直只发 RECT。
+        keepalive 的 HELLO 不恢复 (编解码真不一致时不会每次 HELLO 后再坏一批); 换了 fw (刷了新固件) 才再试"""
         port = LoopPort(caps=ml.CAP_LZ4)
         link = ml.Link(port)
         link.hello()
@@ -297,12 +299,45 @@ class V11Tests(unittest.TestCase):
         self.push_types(link, port)
         self.assertTrue(link.lz4_off)
         self.assertEqual(self.push_types(link, port), [ml.RECT] * 64)
-        link.hello()
         port.bad = 0
+        link.hello()                                           # 同一个 fw 的 HELLO (keepalive / 睡醒)
+        self.assertTrue(link.lz4_off)
+        self.assertEqual(self.push_types(link, port), [ml.RECT] * 64)
+        port.fw = 12
+        link.hello()                                           # fw 变了
+        self.assertFalse(link.lz4_off)
         self.assertEqual(self.push_types(link, port), [ml.RECT_LZ4] * 64)
+        link2 = ml.Link(port)                                  # 重新打开端口 (设备重新枚举): 新 Link 从头试
+        link2.hello()
+        self.assertFalse(link2.lz4_off)
+
+    def test_immersive_present_reject_does_not_disable_lz4(self):
+        """沉浸模式里 RECT / RECT_LZ4 一律计 bad_param、PRESENT 回 status 1: 是模式不对, 不是编解码坏了, 不关 LZ4"""
+        port = LoopPort(caps=ml.CAP_LZ4)
+        link = ml.Link(port)
+        link.hello()
+        port.bad, port.status[ml.PRESENT] = 64, ml.EPARAM
+        self.assertEqual(self.push_types(link, port), [ml.RECT_LZ4] * 64)
+        self.assertFalse(link.lz4_off)
+
+    def test_bad_param_without_lz4_in_batch_does_not_disable(self):
+        """这一批一条 RECT_LZ4 都没有 (比如噪声画面全是 RECT) 时 bad_param 涨了: 不归因到 LZ4"""
+        port = LoopPort(caps=ml.CAP_LZ4)
+        link = ml.Link(port)
+        link.hello()
+        port.bad = 1
+        port.sent.clear()
+        fb, x = bytearray(ml.W * ml.H * 2), 1
+        for r in range(16):                                    # 左上 32×16 是噪声: 压不动, 走 RECT
+            for c in range(64):
+                x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+                fb[r * ml.W * 2 + c] = x >> 16 & 0xFF
+        link.push(bytes(fb), [(0, 0, 32, 16)], 1)
+        self.assertEqual([t for t, _ in port.sent if t in (ml.RECT, ml.RECT_LZ4)], [ml.RECT])
+        self.assertFalse(link.lz4_off)
 
     def test_crc_errors_do_not_disable_lz4(self):
-        """链路上的 CRC 错 (USB 毛刺) 和 LZ4 无关: 只有 bad_param 涨了 / status ≠ 0 才暂停"""
+        """链路上的 CRC 错 (USB 毛刺) 和 LZ4 无关: 只有 bad_param 涨了 (且 PRESENT status 0) 才关"""
         port = LoopPort(caps=ml.CAP_LZ4)
         link = ml.Link(port)
         link.hello()

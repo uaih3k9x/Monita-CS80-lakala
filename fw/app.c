@@ -48,6 +48,7 @@ static uint8_t  g_rx[RX_CHUNK] __attribute__((aligned(4)));
 /* RECT_LZ4 (v11) 暂存区: 整块解在这里 (前 8 字节补 RECT 头), 校验过了才走 lk_rect_apply 写帧缓冲, 坏块不动像素。
  * 放 bss (RAM 窗口) 而不是 malloc: 不跟多缓冲 / 卷轴抢堆, 开机就有; raw_len ≤ MAX_PAYLOAD - 8 正好放得下 */
 static uint8_t  g_lz[MAX_PAYLOAD] __attribute__((aligned(4)));
+_Static_assert(sizeof g_lz >= MAX_PAYLOAD, "dispatch.h 把 MAX_PAYLOAD 当 RECT_LZ4 暂存区容量");
 static const uint32_t g_lz4_ok = 1;
 static uint8_t  g_tx[64];
 static void    *g_sem;
@@ -513,6 +514,7 @@ static void task_entry(void *arg){
             uint32_t n = (uint32_t)r; const uint8_t *d = g_rx;
             link_rx(d, n);
             last_rx = now_us();
+            if (wdt_due(&last_wdt, last_rx)) ql_dev_feed_wdt();   /* 主机一直在写时内层不退出: 这里也得喂 */
             keys_poll();                               /* 整帧连续推 ≈ 300 ms 时也照常采样 */
             imm_poll();                                /* 主机连续写卷轴时滚动也照走 */
         }
@@ -520,7 +522,7 @@ static void task_entry(void *arg){
         tb_poll();                                     /* 待锁存的过了帧头 -> 记成正在扫描 */
         if (g_tb.n == 1 && t - last_rx > 50000u) flush_dirty();               /* 主机没发 PRESENT 也别让像素一直卡在 cache 里 */
         if (!lk_idle(&g_p) && t - last_rx > 500000u) lk_reset(&g_p);   /* 半截帧: 丢掉重新找同步字 */
-        if (t - last_wdt > 1000000u){ ql_dev_feed_wdt(); last_wdt = t; }
+        if (wdt_due(&last_wdt, t)) ql_dev_feed_wdt();
         if (lcd_err == 0) clk_tick(t);
         link_lost_poll();                              /* 主机走了: 开机画面 + 心跳; 太久没主机: 休眠 */
         keys_poll();

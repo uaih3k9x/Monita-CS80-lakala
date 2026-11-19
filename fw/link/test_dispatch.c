@@ -239,7 +239,7 @@ static void ping_stats(uint32_t *rects, uint32_t *bad){
     CHECK(!next_reply());
 }
 /* 一整条 800×20 的单色: 一个字面量像素 + offset 2 的长 match, 最后 0 字面量 */
-static uint32_t solid_lz4(uint8_t *pl, uint32_t y, uint16_t c){
+static uint32_t solid_lz4(uint8_t *pl, uint32_t y, uint16_t c){   /* 返回 payload 长度; 块从 pl + 12 起 */
     lk_wr16(pl, 0); lk_wr16(pl + 2, (uint16_t)y); lk_wr16(pl + 4, 800); lk_wr16(pl + 6, 20); lk_wr32(pl + 8, 32000);
     uint8_t *b = pl + 12; uint32_t n = 0, ml = 32000 - 2 - 4 - 15;
     b[n++] = 0x2F; b[n++] = (uint8_t)c; b[n++] = (uint8_t)(c >> 8); b[n++] = 2; b[n++] = 0;
@@ -275,11 +275,16 @@ static void test_rect_lz4(void){
     n = solid_lz4(pl, 60, 0xFFFF); lk_wr16(pl + 6, 21); lk_wr32(pl + 8, 33600);
     send(LK_RECT_LZ4, pl, n);
     send(LK_RECT_LZ4, pl, 11);                         /* 头都不够 */
+    /* 块本身合法、真能解出 33600 字节 (800×21), 但放不进暂存区 (cap - 8 = 32760): 必须在解码之前就拒。
+     * test.sh 用 -DSIM_PL_CAP=32768 + ASan 编, g_lz 正好 cap 字节: 少了 cap 检查这里就是越界写 */
+    n = solid_lz4(pl, 80, 0xFFFF); lk_wr16(pl + 6, 21); lk_wr32(pl + 8, 33600);
+    { uint32_t ml = 33600 - 2 - 4 - 15, k = 12 + 5; while (ml >= 255){ pl[k++] = 255; ml -= 255; } pl[k++] = (uint8_t)ml; pl[k++] = 0; n = k; }
+    send(LK_RECT_LZ4, pl, n);
     fid[0] = 3;
     send(LK_PRESENT, fid, 2);
     CHECK(next_reply() && rx_pl[0] == LK_PRESENT);
     ping_stats(&r0, &b0);
-    CHECK(r0 == r1 && b0 == b1 + 5);
+    CHECK(r0 == r1 && b0 == b1 + 6);
     CHECK(sim_screen_crc() == crc_rect);
     /* 沉浸模式里: 同 RECT, 计 bad_param 不应答 */
     uint8_t y0[4] = { 0 };
@@ -301,6 +306,8 @@ static void test_rect_lz4(void){
     send(LK_HELLO, 0, 0);
     CHECK(next_reply() && (lk_rd16(rx_pl + 10) & LK_CAP_LZ4));
 }
+
+_Static_assert(SIM_PL_CAP == 32768u, "test.sh 按 max_payload 精确分配暂存区 (-DSIM_PL_CAP=32768)");
 
 int main(void){
     sim_virtual = 1; sim_t_us = 1000000u;

@@ -107,7 +107,20 @@ static void t_wrap(void){
     CHECK(lw_tick(&w, t + LW_LOST_MS + 2 + LW_SLEEP_MS) == LW_SLEEP);
 }
 
+/* 看门狗喂狗节拍 (u32 微秒, 回绕也对): 内外两层循环都调, 主机一直在写时内层不退出也照样喂 */
+static void t_wdt_due(void){
+    uint32_t last = 0;
+    CHECK(!wdt_due(&last, WDT_FEED_US) && last == 0);         /* 正好 1 s: 还不到 */
+    CHECK(wdt_due(&last, WDT_FEED_US + 1) && last == WDT_FEED_US + 1);
+    CHECK(!wdt_due(&last, WDT_FEED_US + 2));                   /* 刚喂过 */
+    last = 0xFFFFFFFFu - 10u;                                  /* 跨回绕 */
+    CHECK(!wdt_due(&last, 100u));
+    CHECK(wdt_due(&last, WDT_FEED_US));
+    CHECK(WDT_FEED_US == 1000000u);
+}
+
 int main(void){
+    t_wdt_due();
     t_no_hello_no_link(); t_constants(); t_lost_after_silence(); t_resume_without_hello();
     t_idle_sleep(); t_host_sleep(); t_key_wakes(); t_unplug(); t_wrap();
     printf(fails ? "linkwd: %d FAIL\n" : "linkwd: all OK\n", fails);

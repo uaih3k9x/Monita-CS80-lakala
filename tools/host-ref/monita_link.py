@@ -145,6 +145,14 @@ def lz4_available():
     return _lz4block is not None
 
 
+def lz4_batch_bad(n_lz, status, bad_param, bad_base):
+    """一批推完, 要不要把 RECT_LZ4 关掉 (三个上位机同一条规则): 这批确实有 RECT_LZ4、PRESENT status 0 (普通模式; 沉浸模式里
+    RECT / RECT_LZ4 一律被拒、PRESENT 回 1, 那是模式不对)、而且 bad_param 比基线涨了 (RECT_LZ4 坏块计在这里; CRC 错是链路毛刺, 不算)。
+    关了之后同一次连接 (端口没重新打开) 里、fw 没变就一直只发 RECT: keepalive 的 HELLO 不恢复,
+    编解码真不一致时不会每次 HELLO 后再坏一批"""
+    return n_lz > 0 and status == OK and bad_param != bad_base
+
+
 def lz4_worth(clen, raw_len):
     """压缩后严格小于原始的 3/4 才值得发 RECT_LZ4 (三个上位机同一条规则)"""
     return clen is not None and clen * 4 < raw_len * 3
@@ -253,7 +261,7 @@ class Link:
         self.ser = open_port(port) if isinstance(port, str) else port
         self.timeout = timeout
         self.lz4 = lz4                  # False: 不发 RECT_LZ4 (A/B 对比); 固件 caps 有 bit8 且装了 python lz4 才真发
-        self.lz4_off = False            # 一批带 RECT_LZ4 的推坏了: 到下一次 HELLO 前只发 RECT
+        self.lz4_off_fw = None          # 一批带 RECT_LZ4 的推坏了 (lz4_batch_bad) 时的 fw: 这个 Link 里 fw 没变就只发 RECT
         self.last_bad = 0               # 最近一条 ACK 的 bad_param (RECT_LZ4 坏块计在这里; CRC 错是链路问题, 不算)
         self.last_push = None           # 上一次 push: dict(bytes, rects, lz4)
         self.seq = 0
@@ -310,7 +318,9 @@ class Link:
     def hello(self, with_time=True):
         pl = hello_payload(self.clock()) if with_time else b""
         self.info = parse_hello_ack(self.wait(HELLO_ACK, self.send(HELLO, pl)))
-        self.lz4_off, self.last_bad = False, 0           # HELLO 清了设备的计数
+        self.last_bad = 0                                # HELLO 清了设备的计数
+        if self.info["fw"] != self.lz4_off_fw:           # 刷了别的固件: RECT_LZ4 再试 (同一个 fw 的 HELLO 不恢复)
+            self.lz4_off_fw = None
         if self.info["proto"] != PROTO_VER:
             warnings.warn("设备 proto_ver = %d, 这份参考实现只认 %d" % (self.info["proto"], PROTO_VER))
         return self.info
@@ -371,6 +381,10 @@ class Link:
         """窗口滚到顶 = y; 返回 ACK (extra = 正在扫描的窗口顶)"""
         return self.call(IMM_SCROLL, imm_scroll_payload(y, dur_ms))
 
+    @property
+    def lz4_off(self):
+        return self.lz4_off_fw is not None
+
     def use_lz4(self):
         """这一批能不能发 RECT_LZ4: 调用方没关、固件有 caps bit8、装了 python lz4、没因为推坏而暂停"""
         return (self.lz4 and not self.lz4_off and lz4_available()
@@ -379,8 +393,8 @@ class Link:
     def push(self, fb, rects, frame_id=0, copies=()):
         """把 fb (整帧 RGB565 字节) 里这些矩形发出去, 再 PRESENT; 返回 PRESENT 的 ACK。
         RECT/COPY 不应答, 一次写进串口, 只等 PRESENT 的 ACK。copies = [(sx,sy,w,h,dx,dy)] 排在 RECT 前面。
-        fw v11: 每个矩形压缩后 < 3/4 就发 RECT_LZ4 (rect_frame)。这一批有 RECT_LZ4 而 ACK 的 bad_param 涨了 (或 status ≠ 0),
-        到下一次 HELLO 前只发 RECT (编解码真不一致时, 调用方的"推整帧恢复"不会一直失败)。CRC 错是链路毛刺, 不暂停。"""
+        fw v11: 每个矩形压缩后 < 3/4 就发 RECT_LZ4 (rect_frame)。这一批推坏了 (lz4_batch_bad) 就关掉 RECT_LZ4:
+        这个 Link 里 fw 没变就一直只发 RECT (编解码真不一致时, 调用方的"推整帧恢复"不会一直失败)。"""
         out = bytearray()
         lz, n_lz = self.use_lz4(), 0
         before = self.last_bad
@@ -395,8 +409,8 @@ class Link:
         self.ser.write(out)
         self.last_push = dict(bytes=len(out), rects=len(rects), lz4=n_lz)
         a = self.call(PRESENT, struct.pack("<H", frame_id & 0xFFFF), timeout=30)
-        if n_lz and (a["status"] != OK or self.last_bad != before):
-            self.lz4_off = True
+        if lz4_batch_bad(n_lz, a["status"], self.last_bad, before):
+            self.lz4_off_fw = self.info["fw"]
         return a
 
 
