@@ -40,6 +40,7 @@
  * 每次 (计时 osiUpTimeUS):
  *   A 解码, 输入在 Flash: lz4_decode(lz4_td_blk -> g_lz + 8)。实机 .rodata 是 XIP 读 Flash, 会比线上略慢;
  *   B 解码, 输入在 RAM: 先把 RECT_LZ4 payload (12 字节头 + 块) 拷进 g_pl (= 线上拆帧收进来的地方), 再从那里解;
+ *     A / B 每次轮换先后 (偶数次 A 先), 免得一个总接在写帧缓冲之后、一个总接在刚解过之后 (cache 状态不同);
  *   C 暂存区 -> 帧缓冲: lk_rect_apply (同 RECT_LZ4 第二段) 写进不在扫描的那块 + dcache_clean 这 32000 字节;
  *   D 合计: lk_rect_lz4_apply (线上同一个函数, 输入在 g_pl) + dcache_clean。
  *   C / D 的条带按次数轮流落在 64 个不同的 y 上 (像一整帧), 免得一直打在同一段 cache 里。
@@ -58,14 +59,16 @@ static void lz4_bench(const uint8_t *pl, uint32_t n){
     lk_wr16(in + 0, 0); lk_wr16(in + 2, 0); lk_wr16(in + 4, LCD_W); lk_wr16(in + 6, LZ4_TD_RAW / (LCD_W * 2u)); lk_wr32(in + 8, LZ4_TD_RAW);
     for (uint32_t i = 0; i < LZ4_TD_LEN; i++) in[12 + i] = lz4_td_blk[i];
     uintptr_t fb = diag_hidden_fb();
+    ql_dev_feed_wdt();                                 /* 进来之前主循环和 tri_collapse 已经花了一段, 先喂一次 */
     for (uint32_t i = 0; i < it; i++){
-        uint32_t t = now_us();
-        ok &= lz4_decode(lz4_td_blk, LZ4_TD_LEN, g_lz + 8, LZ4_TD_RAW) == LZ4_OK;
-        lz4_bench_add(g + 0, now_us() - t);
-        t = now_us();
-        ok &= lz4_decode(in + 12, LZ4_TD_LEN, g_lz + 8, LZ4_TD_RAW) == LZ4_OK;
-        lz4_bench_add(g + 3, now_us() - t);
-        if (i == 0) ok &= lk_crc32(g_lz + 8, LZ4_TD_RAW) == LZ4_TD_CRC;
+        uint32_t t;
+        for (uint32_t v = 0; v < 2; v++){              /* A / B 先后轮换 (偶数次 A 先): 两边前一步的 cache 状态一样, 差值才是 Flash 和 RAM 的差 */
+            uint32_t ram = (i + v) & 1u;
+            t = now_us();
+            ok &= lz4_decode(ram ? in + 12 : lz4_td_blk, LZ4_TD_LEN, g_lz + 8, LZ4_TD_RAW) == LZ4_OK;
+            lz4_bench_add(g + (ram ? 3 : 0), now_us() - t);
+            if (i < 2) ok &= lk_crc32(g_lz + 8, LZ4_TD_RAW) == LZ4_TD_CRC;   /* 两种输入各查一次 */
+        }
         if (fb){
             uint32_t y = (i & 63u) * 20u;
             for (int k = 0; k < 8; k++) g_lz[k] = in[k];
