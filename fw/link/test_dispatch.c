@@ -307,6 +307,68 @@ static void test_rect_lz4(void){
     CHECK(next_reply() && (lk_rd16(rx_pl + 10) & LK_CAP_LZ4));
 }
 
+/* DIAG 33 (DG_LZ4BENCH): 固件内嵌测试条带自测 LZ4 解码 / 拷进后台缓冲 / 2 MB 拷贝。模拟器的时间数字没意义, 只查格式、
+ * 解码结果对不对 (flags bit0)、屏上不动、之后照常推帧 */
+static uint32_t dw(int i){ return lk_rd32(rx_pl + 4 + 4 * (uint32_t)i); }
+static int bench(const uint8_t *req, uint32_t n){
+    send(LK_DIAG, req, n);
+    return next_reply() && rx_type == LK_DIAG_R && rx_pl[0] == 33 && rx_pl[1] == LK_OK && lk_rd16(rx_pl + 2) == 16;
+}
+static int groups_sane(int fb){                         /* 4 组 min / avg / max; 没有后台缓冲时拷贝两组全 0 */
+    for (int g = 0; g < 4; g++){
+        uint32_t a = dw(2 + 3 * g), b = dw(3 + 3 * g), c = dw(4 + 3 * g);
+        if (!fb && g >= 2){ if (a || b || c) return 0; continue; }
+        if (!(a <= b && b <= c)) return 0;
+    }
+    return 1;
+}
+static void test_lz4_bench(void){
+    send(LK_HELLO, 0, 0);
+    CHECK(next_reply() && rx_type == LK_HELLO_ACK);
+    push_solid(0x5555);
+    uint32_t crc0 = sim_screen_crc(), c0 = sim.collapse, u0 = sim.uncollapse;
+    uint8_t req[2] = { 33, 0 };
+    CHECK(bench(req, 1));                              /* 不带参数: 8 次 */
+    CHECK((dw(0) & 0xFFFFu) == 8 && (dw(0) >> 16) == 3u); /* flags: bit0 解码结果 CRC 对, bit1 有后台缓冲 */
+    CHECK(dw(1) == (LZ4_TD_RAW | LZ4_TD_LEN << 16));
+    CHECK(groups_sane(1) && dw(14) == FB_SIZE);
+    CHECK(sim.collapse == c0 + 1 && sim.uncollapse == u0 + 1);
+    CHECK(sim_screen_crc() == crc0);                   /* 写的是不显示的那块 */
+    CHECK(bench(req, 2) && (dw(0) & 0xFFFFu) == 8);    /* n = 0 也是 8 */
+    req[1] = 3;
+    CHECK(bench(req, 2) && (dw(0) & 0xFFFFu) == 3);
+    /* 真时钟跑一遍: 数字非 0 且 min ≤ avg ≤ max */
+    sim_virtual = 0;
+    req[1] = 2;
+    CHECK(bench(req, 2) && groups_sane(1) && dw(4) > 0);
+    sim_virtual = 1;
+    CHECK(sim_screen_crc() == crc0);
+    push_solid(0x0F0F);                                /* 之后照常推帧 (g_pl 被拿去放过测试块) */
+    uint32_t crc1 = sim_screen_crc();
+    CHECK(crc1 != crc0);
+    /* 单缓冲: 没有不显示的那块 -> 只测解码, flags bit1 = 0, 拷贝两组和 2 MB 那项全 0, 屏上不动 */
+    uint8_t nb[2] = { 32, 1 };
+    send(LK_DIAG, nb, 2);
+    CHECK(next_reply() && rx_pl[0] == 32 && dw(0) == 1);
+    CHECK(bench(req, 2) && (dw(0) >> 16) == 1u && groups_sane(0) && dw(14) == 0 && dw(15) == 0);
+    CHECK(sim_screen_crc() == crc1);
+    nb[1] = 0;
+    send(LK_DIAG, nb, 2);
+    CHECK(next_reply() && dw(0) == 3);
+    /* 沉浸模式里 DIAG 一律 EUNSUP; 没有 RECT_LZ4 的旧固件 op 33 不认识 */
+    uint8_t y0[4] = { 0 };
+    send(LK_IMM_ENTER, y0, 4);
+    CHECK(next_reply() && g_imm);
+    send(LK_DIAG, req, 2);
+    CHECK(next_reply() && rx_pl[0] == 33 && rx_pl[1] == LK_EUNSUP);
+    send(LK_IMM_EXIT, 0, 0);
+    CHECK(next_reply() && !g_imm);
+    g_lz4_ok = 0;
+    send(LK_DIAG, req, 2);
+    CHECK(next_reply() && rx_pl[0] == 33 && rx_pl[1] == LK_EUNSUP);
+    g_lz4_ok = 1;
+}
+
 _Static_assert(SIM_PL_CAP == 32768u, "test.sh 按 max_payload 精确分配暂存区 (-DSIM_PL_CAP=32768)");
 
 int main(void){
@@ -325,6 +387,7 @@ int main(void){
     test_idle_sleep_and_key_wake();
     test_unplug();
     test_rect_lz4();
+    test_lz4_bench();
     printf("dispatch: %s\n", fails ? "FAILED" : "all OK");
     return fails ? 1 : 0;
 }

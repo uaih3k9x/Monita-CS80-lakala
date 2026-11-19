@@ -303,6 +303,43 @@ class SmallMaxPayload(unittest.TestCase):
             sim.close()
 
 
+class BenchDevice(unittest.TestCase):
+    """--bench-device（DIAG 33）：对着模拟器跑命令行入口，查打印格式 / 字段（模拟器的时间数字没意义）、屏上不动"""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("cc"):
+            raise unittest.SkipTest("没有 cc，跳过 fwsim 对拍")
+        build_sim()
+
+    def run_cli(self, args, n="3"):
+        import contextlib
+        import io
+        from monita_linux.__main__ import main
+        sim = CF.Sim(SIM, args)
+        try:
+            crc0 = sim.stat()["screen_crc"]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(["--device", sim.pty, "--bench-device", n])
+            self.assertEqual(sim.stat()["screen_crc"], crc0)
+            return rc, buf.getvalue().splitlines()
+        finally:
+            sim.close()
+
+    def test_triple_single_old(self):
+        rc, lines = self.run_cli([])
+        self.assertEqual(rc, 0)
+        self.assertEqual(lines[0], "DIAG 33 LZ4 自测: 3 次, 测试条带 32000 B (LZ4 %d B), 解码结果 OK, 后台缓冲 有" % CF.lz4_td_len())
+        self.assertEqual(len(lines), 7)
+        self.assertTrue(lines[6].startswith("  CPU 整屏拷贝 2048000 B: "))
+        rc, lines = self.run_cli(["--nbuf", "1"], n="2")
+        self.assertEqual((rc, len(lines)), (0, 7))
+        self.assertTrue(lines[0].startswith("DIAG 33 LZ4 自测: 2 次") and lines[0].endswith("后台缓冲 无"))
+        rc, lines = self.run_cli(["--no-lz4"])
+        self.assertEqual((rc, lines), (1, [ml.LZ4BENCH_UNSUP]))
+
+
 def _one(i):
     """子进程里跑第 i 种配置：HELLO 的 tz 是进程级的，各配置的时区（conformance.CONFIGS 的 zone）互不干扰"""
     cfg = CF.CONFIGS[i]

@@ -12,6 +12,10 @@ RECT_LZ4 段（fw v11，`lz4_section` / `Conformance.swift lz4Session`）：先 
 每步看模拟器的 `lz4_rects`（成功的 RECT_LZ4 条数）和 `bad_param`。第五种配置 `--no-lz4` 装成 v10 固件：caps 没 bit8，上位机一条都不发，
 坏块被当成不认识的 type（回 EUNSUP、不计错）。
 
+`--bench-device` 段（fw v11 DIAG 33，`bench_device_check`）：每种配置给三个上位机的命令行各起一个干净的模拟器，跑 `--bench-device 3`。
+模拟器的计时是主机的，数字没意义：数字归一成 `#` 后和 `monita_link.format_lz4bench` 的版式逐行比，第一行（次数 / 字节数 / 解码结果 / 有没有后台缓冲）逐字比，
+屏上 CRC 不许变；单缓冲配置只有解码两行有数；`--no-lz4` 打印"不支持"、退出码 1。解码器和测试条带是固件原样代码（`dispatch.h lz4_bench`），解错了 flags bit0 就不对。
+
 ## 模拟器里是什么
 
 - 真固件代码：`fw/link/dispatch.h`（on_frame / ACK / KEY / 主机在不在）+ proto / blit / tribuf / imm / keys / led / linkwd，

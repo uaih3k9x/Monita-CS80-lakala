@@ -347,5 +347,63 @@ class V11Tests(unittest.TestCase):
         self.assertEqual(self.push_types(link, port), [ml.RECT_LZ4] * 64)
 
 
+class Lz4BenchTests(unittest.TestCase):
+    """DIAG 33 (fw v11, 设备侧 LZ4 自测): 回包解析和打印格式 (三个上位机打印同一份格式)"""
+    W16 = [3 | 3 << 16, 32000 | 1319 << 16, 100, 110, 130, 90, 95, 99, 400, 420, 450, 500, 515, 560, 2048000, 31250]
+
+    def test_parse(self):
+        d = ml.parse_lz4bench(self.W16)
+        self.assertEqual((d["n"], d["ok"], d["fb"], d["raw"], d["comp"]), (3, True, True, 32000, 1319))
+        self.assertEqual(d["dec_flash"], (100, 110, 130))
+        self.assertEqual(d["dec_ram"], (90, 95, 99))
+        self.assertEqual(d["copy"], (400, 420, 450))
+        self.assertEqual(d["total"], (500, 515, 560))
+        self.assertEqual((d["memcpy_bytes"], d["memcpy_us"]), (2048000, 31250))
+        with self.assertRaises(ValueError):
+            ml.parse_lz4bench(self.W16[:15])
+
+    def test_format(self):
+        txt = ml.format_lz4bench(ml.parse_lz4bench(self.W16))
+        self.assertEqual(txt.splitlines(), [
+            "DIAG 33 LZ4 自测: 3 次, 测试条带 32000 B (LZ4 1319 B), 解码结果 OK, 后台缓冲 有",
+            "  解码 (输入在 Flash)      min     100  avg     110  max     130 us",
+            "  解码 (输入在 RAM)        min      90  avg      95  max      99 us",
+            "  暂存区 -> 帧缓冲         min     400  avg     420  max     450 us",
+            "  合计 (RAM 解 + 落帧)     min     500  avg     515  max     560 us",
+            "  x64 条 (约一整帧, 按 avg): 解码 6.1 ms + 落帧 26.9 ms = 33.0 ms (合计实测 33.0 ms)",
+            "  CPU 整屏拷贝 2048000 B: 31250 us (65.5 MB/s)",
+        ])
+
+    def test_format_single_buffer_and_bad(self):
+        w = [8 | 0 << 16, 32000 | 1319 << 16, 1, 2, 3, 1, 2, 3] + [0] * 8
+        lines = ml.format_lz4bench(ml.parse_lz4bench(w)).splitlines()
+        self.assertEqual(lines[0], "DIAG 33 LZ4 自测: 8 次, 测试条带 32000 B (LZ4 1319 B), 解码结果 错, 后台缓冲 无")
+        self.assertEqual(lines[3:], ["  暂存区 -> 帧缓冲         (单缓冲: 没有不显示的那块, 没测)",
+                                     "  合计 (RAM 解 + 落帧)     (单缓冲: 没有不显示的那块, 没测)",
+                                     "  x64 条 (约一整帧, 按 avg): 解码 0.1 ms",
+                                     "  CPU 整屏拷贝: (单缓冲, 没测)"])
+
+    def test_bench_device_over_loop(self):
+        """Link.bench_device: 发 DIAG 33 [n], 返回 (status, dict 或 None)"""
+        W16 = self.W16
+
+        class DiagPort(LoopPort):
+            status33 = ml.OK
+
+            def write(self, data):
+                for t, s, p in ml.Parser().feed(bytes(data)):
+                    self.sent.append((t, p))
+                    body = struct.pack("<H16I", 16, *W16) if self.status33 == ml.OK else b"\0\0"
+                    self.rx += ml.encode(ml.DIAG_R, s, bytes([33, self.status33]) + body)
+                self.in_waiting = len(self.rx)
+        port = DiagPort()
+        link = ml.Link(port)
+        st, d = link.bench_device(3)
+        self.assertEqual(port.sent[-1], (ml.DIAG, bytes([33, 3])))
+        self.assertEqual((st, d["n"]), (ml.OK, 3))
+        port.status33 = ml.EUNSUP
+        self.assertEqual(link.bench_device(), (ml.EUNSUP, None))
+        self.assertEqual(port.sent[-1], (ml.DIAG, bytes([33, 8])))
+
 if __name__ == "__main__":
     unittest.main()

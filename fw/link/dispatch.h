@@ -15,7 +15,9 @@
  *          imm_enter, imm_exit, imm_make_room, tri_collapse, tri_uncollapse, diag_tri, diag_nbuf,
  *          clk_set, boot_link_ok, seg_host_active, seg_draw_local, fg_flush, lcd_backlight, led_poll,
  *          (fw v10) boot_redraw (退出沉浸模式、把开机版权页重画到屏上, Link 行 WAIT), panel_power (背光 + 段码屏 EN 开关),
- *          usb_unplugged (hotplug 回调报过"拔掉"就返回 1, 每次拔掉只报一次)
+ *          usb_unplugged (hotplug 回调报过"拔掉"就返回 1, 每次拔掉只报一次),
+ *          (fw v11, DIAG 33) udiv, ql_dev_feed_wdt, diag_hidden_fb (tri_collapse 之后不在扫描的那块, 0 = 单缓冲),
+ *          diag_fb_copy_all (把正在扫描的那块整屏拷进给定的块, 和三缓冲整屏同步同一种拷法)
  * 地址一律按 uintptr_t 算 (实机 32 位, 模拟器 64 位)。
  *
  * 主机在不在 / 休眠 (fw v10, 状态机在 linkwd.h):
@@ -31,6 +33,69 @@
 #include "led.h"
 #include "linkwd.h"
 #include "lz4.h"
+#include "lz4_testdata.h"
+
+/* ---- DIAG 33 (DG_LZ4BENCH, fw v11): 拿内嵌的测试条带 (lz4_testdata.h, 800×20 RGB565) 自测 RECT_LZ4 的设备侧耗时 ----
+ * 请求 u8 33 [, u8 n] (n 缺省或 0 = 8 次)。调用方先 tri_collapse (屏上那块不动), 之后 tri_uncollapse (其余块下次用时整屏同步)。
+ * 每次 (计时 osiUpTimeUS):
+ *   A 解码, 输入在 Flash: lz4_decode(lz4_td_blk -> g_lz + 8)。实机 .rodata 是 XIP 读 Flash, 会比线上略慢;
+ *   B 解码, 输入在 RAM: 先把 RECT_LZ4 payload (12 字节头 + 块) 拷进 g_pl (= 线上拆帧收进来的地方), 再从那里解;
+ *   C 暂存区 -> 帧缓冲: lk_rect_apply (同 RECT_LZ4 第二段) 写进不在扫描的那块 + dcache_clean 这 32000 字节;
+ *   D 合计: lk_rect_lz4_apply (线上同一个函数, 输入在 g_pl) + dcache_clean。
+ *   C / D 的条带按次数轮流落在 64 个不同的 y 上 (像一整帧), 免得一直打在同一段 cache 里。
+ * 最后计时一次整屏 2 MB 拷贝 (扫描的那块 -> 不在扫描的那块, CPU), 顺手把它恢复成和屏上一样。
+ * 回包 16 个字: n | flags << 16 (bit0 每次解码 / 落帧都成功且解出来的 CRC = LZ4_TD_CRC, bit1 有不在扫描的那块: C / D / 2 MB 有效),
+ *   raw_len | comp_len << 16, A min avg max, B min avg max, C min avg max, D min avg max (us), 2 MB 拷贝字节数, 耗时 us。
+ *   单缓冲时 C / D / 2 MB 全 0 (不能碰屏上那块)。 */
+#define DG_LZ4BENCH 33u
+_Static_assert(sizeof g_pl >= 12u + LZ4_TD_LEN && sizeof g_lz >= 8u + LZ4_TD_RAW, "DIAG 33: g_pl 放得下测试块, g_lz 放得下解出来的条带");
+static void lz4_bench_add(uint32_t *g, uint32_t d){ if (d < g[0]) g[0] = d; g[1] += d; if (d > g[2]) g[2] = d; }
+static void lz4_bench(const uint8_t *pl, uint32_t n){
+    uint32_t it = n >= 2 && pl[1] ? pl[1] : 8u;        /* 先读参数: pl 就是 g_pl, 下面要拿它放测试块 */
+    uint32_t w[16] = { 0 }, *g = w + 2, ok = 1, y0, y1, last_wdt = now_us();
+    for (int k = 0; k < 4; k++) g[3 * k] = 0xFFFFFFFFu;
+    uint8_t *in = g_pl;
+    lk_wr16(in + 0, 0); lk_wr16(in + 2, 0); lk_wr16(in + 4, LCD_W); lk_wr16(in + 6, LZ4_TD_RAW / (LCD_W * 2u)); lk_wr32(in + 8, LZ4_TD_RAW);
+    for (uint32_t i = 0; i < LZ4_TD_LEN; i++) in[12 + i] = lz4_td_blk[i];
+    uintptr_t fb = diag_hidden_fb();
+    for (uint32_t i = 0; i < it; i++){
+        uint32_t t = now_us();
+        ok &= lz4_decode(lz4_td_blk, LZ4_TD_LEN, g_lz + 8, LZ4_TD_RAW) == LZ4_OK;
+        lz4_bench_add(g + 0, now_us() - t);
+        t = now_us();
+        ok &= lz4_decode(in + 12, LZ4_TD_LEN, g_lz + 8, LZ4_TD_RAW) == LZ4_OK;
+        lz4_bench_add(g + 3, now_us() - t);
+        if (i == 0) ok &= lk_crc32(g_lz + 8, LZ4_TD_RAW) == LZ4_TD_CRC;
+        if (fb){
+            uint32_t y = (i & 63u) * 20u;
+            for (int k = 0; k < 8; k++) g_lz[k] = in[k];
+            lk_wr16(g_lz + 2, y);
+            t = now_us();
+            ok &= lk_rect_apply((uint16_t *)fb, LCD_W, LCD_H, g_lz, 8u + LZ4_TD_RAW, &y0, &y1) == LK_OK;
+            dcache_clean(fb + y * ROW_B, LZ4_TD_RAW);
+            lz4_bench_add(g + 6, now_us() - t);
+            y = ((i + 32u) & 63u) * 20u;
+            lk_wr16(in + 2, y);
+            t = now_us();
+            ok &= lk_rect_lz4_apply((uint16_t *)fb, LCD_W, LCD_H, in, 12u + LZ4_TD_LEN, g_lz, sizeof g_lz, &y0, &y1) == LK_OK;
+            dcache_clean(fb + y * ROW_B, LZ4_TD_RAW);
+            lz4_bench_add(g + 9, now_us() - t);
+        }
+        if (wdt_due(&last_wdt, now_us())) ql_dev_feed_wdt();
+    }
+    for (int k = 0; k < 4; k++){
+        if (k >= 2 && !fb){ g[3 * k] = 0; continue; }
+        g[3 * k + 1] = udiv(g[3 * k + 1], it, 0);
+    }
+    if (fb){
+        uint32_t t = now_us();
+        diag_fb_copy_all(fb);
+        w[15] = now_us() - t; w[14] = FB_SIZE;
+    }
+    w[0] = it | (ok ? 1u << 16 : 0u) | (fb ? 1u << 17 : 0u);
+    w[1] = LZ4_TD_RAW | LZ4_TD_LEN << 16;
+    diag_reply(DG_LZ4BENCH, LK_OK, w, 16);
+}
 
 /* ACK: u8 for_type u8 status u16 0 | u32 rx_bytes frames crc_err len_err rects presents bad_param uptime | u32 extra */
 static void ack(uint8_t status, uint32_t extra){
@@ -217,6 +282,7 @@ static void on_frame(void){
         if (n < 1){ diag_reply(0, LK_EPARAM, 0, 0); return; }     /* 空 payload: g_pl[0] 是上一帧留下的, 别拿它当 op */
         if (pl[0] == 31){ diag_tri(); return; }          /* DG_TRI: 多缓冲状态 */
         if (n == 2 && pl[0] == 32){ diag_nbuf(pl[1]); return; }    /* DG_NBUF: 切块数 */
+        if (pl[0] == DG_LZ4BENCH && g_lz4_ok){ tri_collapse(); lz4_bench(pl, n); tri_uncollapse(); return; }   /* 没有 LZ4 的旧固件: 不认识 */
         if (n == 2 && pl[0] == 11){                    /* DG_FLIPMODE: u8 mode -> 当前 mode */
             g_flip_now = pl[1] ? 1u : 0u;
             uint32_t w = g_flip_now;

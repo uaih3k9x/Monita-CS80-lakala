@@ -69,10 +69,16 @@ var immersiveFlag = false
 var segPngPath: String?
 /// fw v11：不发 RECT_LZ4（A/B 对比整帧快慢）
 var lz4Flag = true
+/// fw v11：--bench-device [N]，设备侧 LZ4 自测（DIAG 33）N 次，打印后退出
+var benchDevice: Int?
 do {
     var args = CommandLine.arguments.dropFirst().makeIterator()
+    var afterBenchDevice = false
     while let a = args.next() {
+        defer { afterBenchDevice = a == "--bench-device" }
+        if afterBenchDevice, let n = Int(a) { benchDevice = n; continue }
         switch a {
+        case "--bench-device": benchDevice = 8
         case "--host": hostURL = args.next() ?? hostURL
         case "--device":
             let v = args.next() ?? ""
@@ -99,7 +105,7 @@ do {
         case "--seg-png": segPngPath = args.next()
         case "--no-lz4": lz4Flag = false
         default:
-            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock|--immersive] [--immersive] [--no-lz4]")
+            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock|--immersive] [--immersive] [--no-lz4] [--device ... --bench-device [N]]")
             exit(a == "-h" || a == "--help" ? 0 : 2)
         }
     }
@@ -443,6 +449,15 @@ let link: DeviceLink? = deviceSpec.map { spec in
     }
     l.lz4 = lz4Flag
     return l
+}
+if let n = benchDevice {
+    // DIAG 33：屏上那块不动；跑之前先停掉常驻的上位机（同一个设备只能一个进程开）
+    guard let link else { print("--bench-device 要配 --device"); exit(2) }
+    guard link.connectIfNeeded() else { print("连不上设备 \(link.name)"); exit(1) }
+    if let d = Lz4BenchResult(diagReply: link.request(LinkType.diag, lz4BenchRequest(n: n), replyType: LinkType.diagR, timeoutMs: 30_000)) {
+        print(formatLz4Bench(d)); exit(0)
+    }
+    print(lz4BenchUnsupported); exit(1)
 }
 if bench || conformance {
     guard let link else { print("--bench / --conformance 要配 --device"); exit(2) }

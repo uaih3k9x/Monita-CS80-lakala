@@ -431,6 +431,10 @@ static void diag_nbuf(uint8_t v){
     diag_reply(32, 0, &w, 1);
 }
 
+/* DIAG 33 (dispatch.h lz4_bench, fw v11): tri_collapse 之后不在扫描的那块 (0 = 单缓冲); 整屏从扫描的那块拷过去 (ldm/stm + clean) */
+static uint32_t diag_hidden_fb(void){ return g_back; }
+static void diag_fb_copy_all(uint32_t d){ copy_rows(d, g_front, 0, LCD_H); }
+
 /* ---- 主机走了 / 休眠 (fw v10), dispatch.h 用 ---- */
 /* 开机版权页重画到屏上: 先退出沉浸模式 (还回多缓冲), 没提交的改动作废、等待锁存的落定, 再画在正在扫描的那块上 */
 static void boot_redraw(void){

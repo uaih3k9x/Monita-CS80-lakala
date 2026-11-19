@@ -13,6 +13,7 @@
   python cs80.py PORT teartest              撕裂 A/B 对比 (要人看/拍慢动作), 各阶段会打印提示
   python cs80.py PORT scrollbench [N]       歌词区 COPY 滚动测速 (同 Mac --bench 的 COPY 段): 两种翻页模式各 N 帧 + FBCRC
   python cs80.py PORT tri [N]               多缓冲状态 (fw v6); 给 N (1..3, 0 = 自动) 则先切块数
+  python cs80.py PORT --bench-device [N]    设备侧 LZ4 自测 (DIAG 33, fw v11): 内嵌测试条带解码 / 落帧各 N 次 (默认 8, ≤ 255), 屏上不动
   python cs80.py PORT e0                    零拷贝实验 E0: 0x24 是不是扫描行号 (只读, 不动画面)
   python cs80.py PORT e1 [秒]               零拷贝实验 E1: 帧中途改扫描基址是否立即生效 (要人看/拍照)
   python cs80.py PORT zc line|ruler [tint]|split FRAMES T1 T2 TOP|arm 0|1|peek OFF|poke OFF VAL [HOLD_MS]
@@ -252,6 +253,11 @@ def main():
         teartest(link)
     elif cmd == "scrollbench":
         scrollbench(link, int(args[0]) if args else 60)
+    elif cmd == "--bench-device":
+        st, d = link.bench_device(int(args[0]) if args else 8)
+        print(ml.format_lz4bench(d) if d else ml.LZ4BENCH_UNSUP)
+        link.close()
+        sys.exit(0 if d else 1)
     elif cmd == "tri":
         if args:
             print("块数 ->", link.diag(ml.DG_NBUF, bytes([int(args[0])])))

@@ -25,6 +25,8 @@ def parse_args(argv=None):
     ap.add_argument("--at", type=float, help="配 --sample：进度（秒）")
     ap.add_argument("--clock", action="store_true", help="配 --png：画时钟页")
     ap.add_argument("--no-lz4", action="store_true", help="不发 RECT_LZ4（fw v11 的压缩推帧；没装 python3-lz4 时本来就不发）")
+    ap.add_argument("--bench-device", nargs="?", const=8, type=int, metavar="N",
+                    help="设备侧 LZ4 自测（DIAG 33，fw v11）：内嵌测试条带解码 / 落帧各 N 次（默认 8），打印后退出；屏上不动")
     ap.add_argument("-v", "--verbose", action="store_true")
     return ap.parse_args(argv)
 
@@ -92,8 +94,28 @@ def build(args):
     return app
 
 
+def bench_device(args, open_dev=None):
+    """--bench-device：HELLO 之后发一条 DIAG 33，打印结果（格式同 cs80.py / Mac 的 --bench-device）。返回退出码"""
+    import monita_link as ml
+    from .transport import open_device
+    port = (open_dev or open_device)(args.device)
+    if port is None:
+        print("找不到设备（--device %s）" % args.device, file=sys.stderr)
+        return 1
+    link = ml.Link(port)
+    try:
+        link.hello()
+        _, d = link.bench_device(args.bench_device)
+    finally:
+        link.close()
+    print(ml.format_lz4bench(d) if d else ml.LZ4BENCH_UNSUP)
+    return 0 if d else 1
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.bench_device is not None:
+        return bench_device(args)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(name)s %(message)s")
     from .render.fonts import FontError
     try:

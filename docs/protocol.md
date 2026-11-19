@@ -313,6 +313,28 @@ fw v3 及之前回包缓冲只有 48 B：13 个字以上的回包（PEEK 16 字�
 | 26–30 | 已移除（DMA 研究结论：不比 CPU 快，见 [r05-notes.md](r05-notes.md)） | v4–v5 研究期 |
 | 31 | → `n nbuf note s p d gver waits xcopies syncs full_syncs buf0 buf1 buf2 flip_wait_us`。note：0 = 三块都拿到，1 = 第三块 malloc 失败，2 = 拿到了但余量不够（已还），3 = 连第二块都没有 | v6 |
 | 32 | `u8 n`（1–3；0 = 能用几块用几块）→ 生效块数，用来做三缓冲 / 双缓冲 / 单缓冲 A/B 对比 | v6 |
+| 33 | `[u8 n]`（缺省 / 0 = 8）→ 16 个字：设备侧 LZ4 自测（下面 "DIAG 33"）；没有 RECT_LZ4 的固件回 3 | v11 |
+
+#### DIAG 33：设备侧 LZ4 自测（fw v11，`caps` bit8 的固件才有）
+
+固件里内嵌一条测试条带（`fw/link/lz4_testdata.h`，`tools/lz4bench/gen_testdata.py` 从 `docs/img/lyrics-playing.png` 生成：
+800×20 RGB565 = 32000 B，liblz4 压成 1319 B，这帧 64 条里压缩后大小最接近平均的一条，×64 ≈ 解这一整帧），自己解 n 次并用 `osiUpTimeUS` 计时：
+
+- A **解码，输入在 Flash**：测试块是 `.rodata`，实机 XIP 读 Flash，所以比线上略慢（线上块在 RAM 里的 payload 缓冲里）；
+- B **解码，输入在 RAM**：先把 RECT_LZ4 payload（12 字节头 + 块）拷进 payload 缓冲（线上拆帧收进来的同一个地方），再从那里解，对照 A；
+- C **暂存区 → 帧缓冲**：`lk_rect_apply`（RECT_LZ4 的第二段）写进**不在扫描的那块** + clean 这 32000 B；
+- D **合计**：`lk_rect_lz4_apply`（线上同一个函数，输入在 RAM）+ clean。C / D 的条带按次数轮流落在 64 个不同的 y 上；
+- 最后一次 CPU 整屏拷贝（扫描的那块 → 不在扫描的那块，`ldm/stm` + clean，同三缓冲整屏同步）作对照，顺手把那块恢复成和屏上一样。
+
+执行前先收拢多缓冲（同旧 DIAG），屏上那块一个像素都不动；之后其余块下次用时整屏同步，**不用推整帧**。单缓冲时没有不在扫描的那块：只测 A / B，C / D / 拷贝全 0。
+长循环里按 `wdt_due` 喂狗。沉浸模式里同其他 DIAG 回 3。
+
+回包 16 个字：`n | flags << 16`（bit0 = 每次解码 / 落帧都成功且解出来的 CRC 对，bit1 = 有不在扫描的那块），`raw_len | comp_len << 16`，
+A min avg max，B min avg max，C min avg max，D min avg max（us），整屏拷贝字节数，耗时 us。
+
+上位机（打印同一份格式，`monita_link.format_lz4bench`；之前先停掉常驻的上位机，同一个设备同时只能一个进程开）：
+`monita-cs80 --device usb --bench-device [N]`、`python3 tools/host-ref/cs80.py PORT --bench-device [N]`、`monita-cs80-linux --device usb --bench-device [N]`。
+主机上的指令计数粗估见 [tools/lz4bench/QEMU.md](../tools/lz4bench/QEMU.md)。
 
 fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前，固件先退回"双缓冲视角"：等待锁存完成，扫描落在 FB_ADDR 或第二块上，两块内容一致。执行完再重建三缓冲状态。诊断之后主机照旧推一次整帧。
 
@@ -357,7 +379,9 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 - **A5 估计**（UIS8910DM 的 Cortex-A5，主频按 400–500 MHz 估；周期数是拍脑袋的数量级）：逐字节 ~5 周期 / 字节、按字 ~6 周期 / 4 字节、~40 周期 / 序列
   → 解码 8–10 ms / 帧（全逐字节的话 21–27 ms）。暂存区 → 帧缓冲的 2 MB 拷贝受 PSRAM 写带宽限制（实测 CPU / DMA 都是 ~64 MB/s）约 31 ms，
   直接解进帧缓冲也躲不开这 2 MB 写。传输约 10 ms，和解码部分交错（解码时 USB 照样往内核缓冲里收）。
-  **合计估计整帧 40–50 ms（原来 320–390 ms），没上机，等真机验证**。最大的未知数：暂存区（bss，在 RAM 窗口里，物理上和帧缓冲同一块 PSRAM）
+  **合计估计整帧 40–50 ms（原来 320–390 ms），没上机，等真机验证**（真机用 DIAG 33 量，见上面 "DIAG 33"）。
+  QEMU 指令计数（[tools/lz4bench/QEMU.md](../tools/lz4bench/QEMU.md)，同一份解码器、同一套编译选项）：解一条 32000 B 条带 78 k 条指令，
+  按 CPI 1.0–1.5、400–500 MHz 换算整帧 10–19 ms，上面的 8–10 ms 偏乐观。最大的未知数：暂存区（bss，在 RAM 窗口里，物理上和帧缓冲同一块 PSRAM）
   如果 D-cache 兜不住，解码的输出也要写回 PSRAM，设备侧会再多 ~30 ms，按 40–80 ms 看。对比方法：Mac 上 `monita-cs80 --device usb --bench` 和加 `--no-lz4` 各跑一次（看"整帧"那行）；
   有串口的系统上也可以 `cs80.py PORT bench 10 docs/img/clock.png docs/img/lyrics-playing.png` 和加 `--no-lz4`。
 - 三缓冲的老代价会露出来：整帧提交之后，**下一批**开头要把新画的那块从刚提交的那块整屏抄回（2 MB，≈ 25–35 ms，`tribuf.h`）。

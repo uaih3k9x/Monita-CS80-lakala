@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """上位机对照测试: 固件模拟器 (fwsim) × Python 参考实现 (tools/host-ref) × Swift (mac/, monita-cs80 --conformance)
 × Linux 上位机 (linux/, Session; 只跑 HELLO + RECT_LZ4 那一段, 见 linux_session)。
+另外三个上位机的命令行 --bench-device (DIAG 33, 设备侧 LZ4 自测) 各对着一个干净的模拟器跑一次, 只查打印格式 / 字段 (bench_device_check)。
 
 每种模拟器配置起一个干净的 fwsim, 两个上位机各跑一遍同样的脚本 (HELLO、整帧 / COPY / FBCRC、SEG、LED、
 按键注入、未知 type、DIAG、坏帧、沉浸模式 ...), 结果和 expected() (照 docs/protocol.md 写的) 逐项对比,
@@ -640,6 +641,55 @@ def fw_ver():
     raise RuntimeError("fw/app.c 里没有 FW_VER")
 
 
+# ---- DIAG 33 (fw v11) 设备侧 LZ4 自测: 三个上位机的命令行 --bench-device 对着模拟器跑, 只查格式 / 字段 ----
+# 模拟器里的时间是主机的, 数字没意义: 数字一律归一成 #, 和 monita_link.format_lz4bench 的版式逐行比; 第一行 (次数 / 字节数 /
+# 解码结果 / 有没有后台缓冲) 逐字比。旧固件 (--no-lz4): 打印"不支持"那一行、退出码 1。屏上那块不许动。
+
+def lz4_td_len():
+    for line in open(os.path.join(ROOT, "fw", "link", "lz4_testdata.h"), encoding="utf-8"):
+        if line.startswith("#define LZ4_TD_LEN"):
+            return int(line.split()[2].rstrip("u"))
+    raise RuntimeError("fw/link/lz4_testdata.h 里没有 LZ4_TD_LEN")
+
+
+def bench_device_expected(cfg, n=3):
+    if not cfg.get("lz4", True):
+        return 1, [ml.LZ4BENCH_UNSUP]
+    fb = cfg["nbuf"] > 1
+    w = [n | (1 << 16) | ((1 << 17) if fb else 0), 32000 | lz4_td_len() << 16] + [1] * 6 + ([1] * 6 + [ml.W * ml.H * 2, 1] if fb else [0] * 8)
+    return 0, ml.format_lz4bench(ml.parse_lz4bench(w)).splitlines()
+
+
+def bench_device_check(sim_exe, cfg, host, swift=None):
+    import re
+    sim = Sim(sim_exe, cfg["args"])
+    try:
+        crc0 = sim.stat()["screen_crc"]
+        if host == "python":
+            cmd, cwd, env = [sys.executable, "-I", os.path.join(ROOT, "tools", "host-ref", "cs80.py"), sim.pty, "--bench-device", "3"], ROOT, None
+        elif host == "linux":
+            cmd, cwd = [sys.executable, "-m", "monita_linux", "--device", sim.pty, "--bench-device", "3"], os.path.join(ROOT, "linux")
+            env = dict(os.environ, PYTHONPATH=os.path.join(ROOT, "linux"))
+        else:
+            cmd, cwd, env = [swift, "--device", sim.pty, "--bench-device", "3"], ROOT, None
+        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
+        crc1 = sim.stat()["screen_crc"]
+    finally:
+        sim.close()
+    rc, want = bench_device_expected(cfg)
+    logline = re.compile(r"^\d\d-\d\d \d\d:\d\d:\d\d ")                 # Swift 连上时的日志行 (main.swift log)
+    got = [line for line in r.stdout.splitlines() if line.strip() and not logline.match(line)]
+    norm = lambda lines: [re.sub(r" +", " ", re.sub(r"\d+(\.\d+)?", "#", line)) for line in lines]   # 数字宽度不同, 对齐空格跟着变
+    d = []
+    if r.returncode != rc:
+        d.append("退出码应为 %d, 实际 %d (stderr: %s)" % (rc, r.returncode, r.stderr.strip()[-300:]))
+    if got[:1] != want[:1] or norm(got) != norm(want):
+        d.append("输出应为 %r, 实际 %r" % (want, got))
+    if crc1 != crc0:
+        d.append("屏上那块被动过")
+    return d
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sim", default=os.path.join(ROOT, "tools", "fwsim", "build", "fwsim"))
@@ -682,6 +732,13 @@ def main():
                 if st[k] != v:
                     d.append("模拟器 %s: 应为 %r, 实际 %r" % (k, v, st[k]))
             print("%-4s %-7s %-28s %.1f s" % ("OK" if not d else "FAIL", host, cfg["name"], time.monotonic() - t0))
+            for line in d:
+                print("       " + line)
+            fails += len(d)
+        for host in ["python"] + (["swift"] if args.swift else []) + ([] if args.no_linux else ["linux"]):
+            t0 = time.monotonic()
+            d = bench_device_check(args.sim, cfg, host, args.swift)
+            print("%-4s %-7s %-28s %.1f s" % ("OK" if not d else "FAIL", host, "--bench-device " + cfg["name"], time.monotonic() - t0))
             for line in d:
                 print("       " + line)
             fails += len(d)

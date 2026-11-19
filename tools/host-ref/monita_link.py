@@ -39,6 +39,7 @@ IMM_VISIBLE = 0x01                              # IMM_RECT flags bit0: 允许写
 DG_MEMQ, DG_MAXBLK, DG_BUFS, DG_SCAN, DG_PEEK, DG_FILL, DG_FLIP, DG_EVT, DG_PHASE, DG_DBUF = 0, 1, 2, 3, 4, 5, 6, 7, 9, 10
 DG_FLIPMODE = 11                                # fw v2: 翻页时机, v4 起默认 1 = 立即 (26..30 曾是 DMA 研究, 已移除)
 DG_TRI, DG_NBUF = 31, 32                        # fw v6: 多缓冲状态 / 切块数
+DG_LZ4BENCH = 33                                # fw v11: 设备侧 LZ4 自测 (内嵌测试条带, fw/link/dispatch.h lz4_bench)
 TRI_FIELDS = ("n", "nbuf", "note", "s", "p", "d", "gver", "waits", "xcopies", "syncs", "full_syncs", "buf0", "buf1", "buf2", "flip_wait_us")
 # 零拷贝滚动实验 (fw v3, fw/link/zc_diag.h)
 DG_ZC_ARM, DG_ZC_PEEK, DG_ZC_POKE, DG_ZC_LINE, DG_ZC_RULER, DG_ZC_SPLIT = 20, 21, 22, 23, 24, 25
@@ -46,6 +47,46 @@ LINE_US = 26600 / 1310          # 每行时长 (面板 vtotal 1310 行, 帧周�
 VBLANK_LINES = 3 + 11           # vsync + vbp: 0x04 事件之后多少行才到有效区第 0 行 (推测 0x04 = vsync 起点)
 # ACK 的 9 个 u32。注意 "uptime_ms" 实际单位是 1.024 ms (固件 osiUpTimeUS >> 10); 键名是公开接口, 不改
 STAT_NAMES = ("rx_bytes", "frames", "crc_err", "len_err", "rects", "presents", "bad_param", "uptime_ms", "extra")
+
+
+# ---- DIAG 33 (fw v11): 设备侧 LZ4 自测。三个上位机 (cs80.py / linux / Mac) 的 --bench-device 打印同一份格式 ----
+LZ4BENCH_ROWS = (("dec_flash", "  解码 (输入在 Flash)      "), ("dec_ram", "  解码 (输入在 RAM)        "),
+                 ("copy", "  暂存区 -> 帧缓冲         "), ("total", "  合计 (RAM 解 + 落帧)     "))
+
+
+def parse_lz4bench(w):
+    """DIAG 33 回包的 16 个字 -> dict (时间单位 us; 每组 (min, avg, max))"""
+    if len(w) != 16:
+        raise ValueError("DIAG 33 回包应为 16 个字, 收到 %d" % len(w))
+    d = dict(n=w[0] & 0xFFFF, ok=bool(w[0] >> 16 & 1), fb=bool(w[0] >> 17 & 1), raw=w[1] & 0xFFFF, comp=w[1] >> 16,
+             memcpy_bytes=w[14], memcpy_us=w[15])
+    for i, (k, _) in enumerate(LZ4BENCH_ROWS):
+        d[k] = tuple(w[2 + 3 * i:5 + 3 * i])
+    return d
+
+
+def format_lz4bench(d):
+    out = ["DIAG 33 LZ4 自测: %d 次, 测试条带 %d B (LZ4 %d B), 解码结果 %s, 后台缓冲 %s"
+           % (d["n"], d["raw"], d["comp"], "OK" if d["ok"] else "错", "有" if d["fb"] else "无")]
+    for k, label in LZ4BENCH_ROWS:
+        if k in ("copy", "total") and not d["fb"]:
+            out.append(label + "(单缓冲: 没有不显示的那块, 没测)")
+        else:
+            out.append(label + "min %7d  avg %7d  max %7d us" % d[k])
+    dec = d["dec_ram"][1] * 64 / 1000
+    if d["fb"]:
+        cp = d["copy"][1] * 64 / 1000
+        out.append("  x64 条 (约一整帧, 按 avg): 解码 %.1f ms + 落帧 %.1f ms = %.1f ms (合计实测 %.1f ms)"
+                   % (dec, cp, dec + cp, d["total"][1] * 64 / 1000))
+        out.append("  CPU 整屏拷贝 %d B: %d us (%.1f MB/s)"
+                   % (d["memcpy_bytes"], d["memcpy_us"], d["memcpy_bytes"] / max(d["memcpy_us"], 1)))
+    else:
+        out.append("  x64 条 (约一整帧, 按 avg): 解码 %.1f ms" % dec)
+        out.append("  CPU 整屏拷贝: (单缓冲, 没测)")
+    return "\n".join(out)
+
+
+LZ4BENCH_UNSUP = "固件不支持 DIAG 33 (要 fw v11 带 LZ4 自测的这一版; 沉浸模式里也会被拒)"
 
 
 def crc32(b):
@@ -343,6 +384,12 @@ class Link:
         p = self.wait(DIAG_R, self.send(DIAG, bytes([op]) + args), timeout)
         n = struct.unpack_from("<H", p, 2)[0]
         return p[1], list(struct.unpack_from("<%dI" % n, p, 4))
+
+    def bench_device(self, n=8):
+        """DIAG 33: 设备拿内嵌测试条带自测 LZ4 解码 / 落帧 (n 次, 1..255)。返回 (status, parse_lz4bench 的 dict 或 None)。
+        屏上那块不动; 固件先收拢多缓冲, 之后其余块下次用时整屏同步。n = 255 时设备要忙 ~1 s, 超时放宽到 30 s"""
+        st, w = self.diag(DG_LZ4BENCH, bytes([max(1, min(255, n))]), timeout=30)
+        return (st, parse_lz4bench(w)) if st == OK else (st, None)
 
     def led(self, mask, mode, period_ms=0, on_ms=0, duration_ms=0):
         return self.call(LED, led_payload(mask, mode, period_ms, on_ms, duration_ms))

@@ -7,7 +7,7 @@
  *   - 按键电平 / PWRKEY 计数由 sim_key_* 注入, USB 拔掉 (hotplug 回调) 由 sim_usb_unplug 注入; 灯、背光、段码屏 EN 只记下来给测试看;
  *   - 开机版权页是真固件代码 (fw/lcd/bootscreen.h) 画进屏上那块缓冲 (日期固定), 主机走了重画时屏上 CRC 应回到 sim_boot_crc;
  *   - 段码屏本地时钟是真固件代码 (fw/fg00/segclock.h + fgbuf.h + segmap.h), 只是 fg_flush 不刷 I2C, 显存 fg_fb 给测试看;
- *   - DIAG: 31 / 32 / 11 和"先收拢多缓冲"的分流走 dispatch.h, 具体的旧 op (diag.h, 碰寄存器) 换成桩:
+ *   - DIAG: 31 / 32 / 11 / 33 (LZ4 自测, 真解码器 + 内嵌测试条带, 时间数字没意义) 和"先收拢多缓冲"的分流走 dispatch.h, 具体的旧 op (diag.h, 碰寄存器) 换成桩:
  *     认识的 op 回 status 0、不带数据, 不认识的回 3 (同实机)。
  * 用的地方: tools/fwsim/fwsim.c (pty 上跑, 给上位机连) 和 fw/link/test_dispatch.c (单测)。
  * 包含方先定义 sim_out (设备 -> 主机的字节去哪)。
@@ -221,6 +221,14 @@ static void diag_nbuf(uint8_t v){
     uint32_t w = g_tb.n;
     diag_reply(32, 0, &w, 1);
 }
+
+/* DIAG 33 (dispatch.h lz4_bench) 要的: 不在扫描的那块 (tri_collapse 之后), 整屏拷贝, 喂狗 (桩) */
+static uintptr_t diag_hidden_fb(void){
+    for (uint32_t i = 0; i < g_tb.n; i++) if ((int)i != g_tb.s && (int)i != g_tb.p) return tb_addr((int)i);
+    return 0;
+}
+static void diag_fb_copy_all(uintptr_t d){ memcpy((void *)d, (const void *)sim_scan, FB_SIZE); }
+static int  ql_dev_feed_wdt(void){ return 0; }
 
 /* diag.h 的旧 op 换成桩 */
 static void on_diag(const uint8_t *pl, uint32_t n){

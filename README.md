@@ -106,7 +106,7 @@ linux/                  Linux 上位机（Python）：MPRIS 读正在播放、Pi
 tools/
   host-ref/             Python 参考上位机（pyserial 或 termios）：握手、推图、差分、KEY / LED / 沉浸模式、测吞吐、撕裂对比
   fwsim/                固件模拟器（协议层是固件原样代码，伪终端当串口）+ 上位机对照测试 run.sh
-  lz4bench/             RECT_LZ4 基准：真实渲染帧的压缩比、主机压缩 / 固件解码器耗时、和 liblz4 差分对拍
+  lz4bench/             RECT_LZ4 基准：真实渲染帧的压缩比、主机压缩 / 固件解码器耗时、和 liblz4 差分对拍；DIAG 33 测试条带生成、QEMU 指令计数
   lyrics/               lyrics.py（当前播放 + 网易云歌词 + 小 HTTP 服务）· lyrics_core.js · build-nowplaying.sh · 测试
   segpreview/           段码屏示意图生成器
 docs/
@@ -148,6 +148,7 @@ swift build -c release
 .build/release/monita-cs80 --png out.png --sample Samples/lyrics-playing.json   # 出一张预览图
 .build/release/monita-cs80 --device usb --lyrics http://127.0.0.1:8788     # 直连 R05 固件（macOS：IOKit 直接开 USB 接口）
 .build/release/monita-cs80 --device usb --bench                            # 只测链路：HELLO/PING/整帧+FBCRC/带宽/SEG 时钟
+.build/release/monita-cs80 --device usb --bench-device 16                  # fw v11：设备侧 LZ4 自测（DIAG 33，屏上不动；先停常驻的上位机）
 .build/release/monita-cs80 --scroll-sim --sample Samples/lyrics-playing.json   # 离线模拟一次切句滚动（COPY 规划）
 .build/release/monita-cs80 --lyrics http://127.0.0.1:8788 --name 主人          # 兼容旧链路 host
 ```
