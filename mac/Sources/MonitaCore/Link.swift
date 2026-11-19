@@ -5,6 +5,8 @@ import Foundation
 
 public enum LinkType {
     public static let hello: UInt8 = 0x01, seg: UInt8 = 0x10, rect: UInt8 = 0x20, present: UInt8 = 0x21, copy: UInt8 = 0x22
+    /// fw v11：u16 x, y, w, h + u32 raw_len + LZ4 raw block（caps bit8，MonitaCore/Lz4.swift）；同 RECT 不应答
+    public static let rectLZ4: UInt8 = 0x23
     public static let backlight: UInt8 = 0x30, fbcrc: UInt8 = 0x40, diag: UInt8 = 0x50, ping: UInt8 = 0x7F
     public static let led: UInt8 = 0x31
     /// fw v10：空 → ACK，设备关背光 / 段码屏 / 灯；之后任何一帧叫醒（caps bit7）
@@ -101,6 +103,8 @@ public struct HelloInfo: Equatable {
     public var hasLed: Bool { caps & 0x20 != 0 }
     /// fw v10：SLEEP + 主机 5 s 没帧回开机画面
     public var hasSleep: Bool { caps & 0x80 != 0 }
+    /// fw v11：RECT_LZ4
+    public var hasLZ4: Bool { caps & 0x100 != 0 }
     public var protoSupported: Bool { proto == linkProtoVer }
     /// 单条 RECT / IMM_RECT 的 payload 上限：设备给的 max_payload，但不超过本实现按 32 KiB 切的条带
     public var rectPayloadMax: Int { min(maxPayload, linkMaxPayload) }
@@ -213,18 +217,6 @@ public func copyPayload(_ c: LinkCopy) -> [UInt8] {
 /// COPY 必须在 RECT 前面：RECT 是对着"COPY 之后的画面"算出来的
 public func encodeBatch(_ rects: [LinkRect], _ buf: [UInt16], width: Int = screenW, copies: [LinkCopy] = [],
                         frameID: Int, seq: inout UInt8) -> ([UInt8], UInt8) {
-    var out: [UInt8] = []
-    for c in copies {
-        seq &+= 1
-        out += encodeFrame(type: LinkType.copy, seq: seq, payload: copyPayload(c))
-    }
-    for r in rects {
-        seq &+= 1
-        out += encodeFrame(type: LinkType.rect, seq: seq, payload: rectPayload(r, buf, width: width))
-    }
-    seq &+= 1
-    var pl: [UInt8] = []
-    put16(&pl, frameID & 0xFFFF)
-    out += encodeFrame(type: LinkType.present, seq: seq, payload: pl)
-    return (out, seq)
+    let (out, s, _) = encodeBatchLz4(rects, buf, width: width, copies: copies, frameID: frameID, lz4: false, seq: &seq)
+    return (out, s)
 }

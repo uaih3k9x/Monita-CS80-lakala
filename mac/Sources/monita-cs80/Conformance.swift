@@ -14,6 +14,21 @@ private func patB(_ x: Int, _ y: Int) -> UInt16 { UInt16(((x * 3 + y * 5) & 0xFF
 private func patRow(_ row: Int, _ x: Int) -> UInt16 { UInt16((row * 7 + x * 3) & 0xFFFF) }
 private func patVis(_ row: Int, _ x: Int) -> UInt16 { UInt16(((row * 11 + x) & 0xFFFF) ^ 0xA5A5) }
 
+/// RECT_LZ4 段 (fw v11) 的两种画面：和 conformance.py 的 pat_ui / pat_noise 一致
+private func patUI(_ x: Int, _ y: Int) -> UInt16 {
+    if (100..<700).contains(x) && (300..<700).contains(y) { return 0xFFFF }
+    return y < 900 ? 0x18E3 : UInt16(truncatingIfNeeded: y / 20 * 0x0841)
+}
+private func patNoise(_ x: Int, _ y: Int) -> UInt16 {
+    var h = UInt32(truncatingIfNeeded: x) &* 0x9E37_79B1 ^ UInt32(truncatingIfNeeded: y) &* 0x85EB_CA77
+    h ^= h >> 15
+    h = h &* 0x2C1B_3C6D
+    h ^= h >> 12
+    return UInt16(truncatingIfNeeded: h)
+}
+/// 坏的 RECT_LZ4（同 conformance.py BAD_LZ4）：800×20，块里第一个 match 的 offset 是 0
+private let badLz4: [UInt8] = [0, 0, 0, 0, 0x20, 0x03, 20, 0, 0x00, 0x7D, 0, 0, 0x10, 0xAB, 0x00, 0x00, 0x00]
+
 /// 和 conformance.py 的 SEG_PAT 一致
 private let segPattern: [UInt8] = (0..<72).map { UInt8(($0 * 37 + 11) & 0xFF) }
 
@@ -86,6 +101,7 @@ func runConformance(_ link: DeviceLink) -> Bool {
                    "fbcrc_ok": fbcrc(0, 0, screenW, screenH).extra == fbRegionCRC(b, x: 0, y: 0, w: screenW, h: screenH),
                    "sub_fbcrc_ok": fbcrc(41, 40, 33, 17).extra == fbRegionCRC(b, x: 41, y: 40, w: 33, h: 17)]
     res["fbcrc_bad"] = Int(fbcrc(799, 0, 2, 1).status)
+    res["lz4"] = lz4Session(link, fbcrc: fbcrc)
 
     res["seg"] = [Int(ack(LinkType.seg, segPattern)!.status), Int(ack(LinkType.seg, [UInt8](repeating: 0, count: 71))!.status)]
     snap("seg")
@@ -144,6 +160,36 @@ func runConformance(_ link: DeviceLink) -> Bool {
     guard let data = try? JSONSerialization.data(withJSONObject: res, options: [.sortedKeys]), let s = String(data: data, encoding: .utf8) else { return false }
     print("@result " + s)
     return true
+}
+
+/// 同 conformance.py lz4_section：先 HELLO 清计数；坏块计 bad_param、屏上不动；推坏了之后到下次 HELLO 前只发 RECT
+private func lz4Session(_ link: DeviceLink, fbcrc: (Int, Int, Int, Int) -> AckStats) -> [String: Any] {
+    var ui = [UInt16](repeating: 0, count: screenW * screenH), mixed = ui
+    for y in 0..<screenH { for x in 0..<screenW { ui[y * screenW + x] = patUI(x, y); mixed[y * screenW + x] = y < 640 ? patNoise(x, y) : patUI(x, y) } }
+    let cUI = fbRegionCRC(ui, x: 0, y: 0, w: screenW, h: screenH), cMixed = fbRegionCRC(mixed, x: 0, y: 0, w: screenW, h: screenH)
+    func full() -> UInt32 { fbcrc(0, 0, screenW, screenH).extra }
+    func push(_ fb: [UInt16], _ all: Bool) -> Bool { link.push(all ? fullRects(maxPayload: link.rectMax) : [], fb, frameID: 20) }
+    func bad() { _ = link.send(LinkType.rectLZ4, [badLz4]) }
+    var r: [String: Any] = [:]
+    _ = link.rehello()
+    snap("lz4_hello")
+    r["full"] = [push(ui, true), full() == cUI]
+    snap("lz4_full")
+    r["mixed"] = [push(mixed, true), full() == cMixed]
+    snap("lz4_mixed")
+    bad()
+    r["bad"] = [push(mixed, false), full() == cMixed]
+    snap("lz4_bad")
+    bad()
+    r["fail"] = push(ui, true)
+    snap("lz4_fail")
+    r["recover"] = [push(mixed, true), full() == cMixed]
+    snap("lz4_recover")
+    _ = link.rehello()
+    snap("lz4_hello2")
+    r["again"] = [push(ui, true), full() == cUI]
+    snap("lz4_again")
+    return r
 }
 
 private func immSession(_ link: DeviceLink, ack: (UInt8, [UInt8]) -> AckStats?, ping: () -> AckStats,

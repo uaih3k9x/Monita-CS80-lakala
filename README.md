@@ -41,6 +41,8 @@
 - 按键（fw v8）：`+` / `−` 调 Mac 音量，查询键 播放 / 暂停，≡ 切页。状态灯：播放中绿灯常亮；没连上 Mac 时蓝灯 2 s 亮 1 s 灭（同原厂心跳）。
 - 断开 / 休眠（fw v10，还没上机）：Mac 那边 5 s 没动静（拔线、进程退出）大屏回开机版权页；Mac 睡眠 / 关显示器时背光、段码屏、灯全关，
   Mac 醒来自动接上；没连 Mac 满 10 min 也自己关掉，按任意键看一眼。
+- 整帧压缩（fw v11，还没上机）：开机 / 唤醒 / 重连 / 切页 / 锁屏切换推的整帧用 LZ4 压（2000 KB → 30–90 KB），
+  预计从 ≈ 350 ms 降到 ≈ 50 ms；旧固件、或 Linux 版没装 `python3-lz4` 时自动照发不压缩的。`--no-lz4` 关掉做对比。
 - 沉浸模式（fw v9，还没上机）：整屏只有歌词，当前句大字居中，离得越远越淡；切句时整屏缓动上滚——**滚动只改扫描基址，一个像素都不搬**，
   Mac 只发新露出来的那一句。`--immersive` 开机就进（fw v9 时长按查询键也能切，容易误触，已去掉）。
 
@@ -104,6 +106,7 @@ linux/                  Linux 上位机（Python）：MPRIS 读正在播放、Pi
 tools/
   host-ref/             Python 参考上位机（pyserial 或 termios）：握手、推图、差分、KEY / LED / 沉浸模式、测吞吐、撕裂对比
   fwsim/                固件模拟器（协议层是固件原样代码，伪终端当串口）+ 上位机对照测试 run.sh
+  lz4bench/             RECT_LZ4 基准：真实渲染帧的压缩比、主机压缩 / 固件解码器耗时、和 liblz4 差分对拍
   lyrics/               lyrics.py（当前播放 + 网易云歌词 + 小 HTTP 服务）· lyrics_core.js · build-nowplaying.sh · 测试
   segpreview/           段码屏示意图生成器
 docs/
@@ -121,7 +124,20 @@ bash fw/build.sh            # app + lcd/lcd_test
 bash fw/build.sh all        # 含 diag/
 ```
 
-产物在 `fw/build/*.bin`，写到 NOR `0x60270000`。刷写要在 **Windows** 上让模组进下载模式（macOS 认不出下载态）。**刷机前务必先做整片备份**，刷写流程和风险见 [docs/r05-notes.md](docs/r05-notes.md)。
+产物在 `fw/build/*.bin`，写到 NOR `0x60270000`。各版本（HELLO_ACK 的 `fw_ver`；`proto_ver` 一直是 0，新功能都靠 `caps` 位声明）：
+
+| fw | 加了什么 | `caps` |
+|---|---|---|
+| v2 | COPY（画布内搬矩形，歌词滚动） | bit2 |
+| v4 | 跨缓冲 COPY、默认立即翻页 | |
+| v6 | 三缓冲 | bit3 |
+| v7 | 开机版权页 | |
+| v8 | 按键 KEY + 状态灯 LED | bit4、bit5 |
+| v9 | 沉浸模式 IMM_*（零拷贝滚动） | bit6 |
+| v10 | 主机走了回开机画面、SLEEP、10 min 没主机自动休眠 | bit7 |
+| v11 | RECT_LZ4（LZ4 压缩的 RECT，整帧快 ~6 倍，估计值） | bit8 |
+
+刷写要在 **Windows** 上让模组进下载模式（macOS 认不出下载态）。**刷机前务必先做整片备份**，刷写流程和风险见 [docs/r05-notes.md](docs/r05-notes.md)。
 
 **Mac 端**（macOS 13+，Command Line Tools 即可）：
 
@@ -135,6 +151,8 @@ swift build -c release
 .build/release/monita-cs80 --scroll-sim --sample Samples/lyrics-playing.json   # 离线模拟一次切句滚动（COPY 规划）
 .build/release/monita-cs80 --lyrics http://127.0.0.1:8788 --name 主人          # 兼容旧链路 host
 ```
+
+整帧压缩（直连 + fw v11，`caps` bit8）：用系统自带的 Compression 框架，每条压缩后 < 3/4 才发；`--no-lz4` 关掉（A/B 对比整帧快慢）。
 
 按键和状态灯（直连 + fw v8 才有，固件 HELLO_ACK 的 `caps` 说了算）：`+` / `−` 用 `osascript` 调系统音量（每下 6/100），
 查询键短按 播放 / 暂停（走 mediaremote-adapter 的 `send 2`），
@@ -172,7 +190,7 @@ Linux 版已经有了一个 Python 实现（MPRIS + logind + pyusb，见 [linux/
 就能当它的上位机。协议还是草案，有想法欢迎开 issue 一起定。
 
 **没有设备也能测**：`tools/fwsim/` 是固件的主机模拟器，协议层就是固件自己的代码，开一个伪终端当 USB 串口。
-`sh tools/fwsim/run.sh` 让 Python 参考实现（`tools/host-ref/`）和 Mac 版各跑一遍对照脚本，结果要和协议文档一致；
+`sh tools/fwsim/run.sh` 让 Python 参考实现（`tools/host-ref/`）和 Mac 版各跑一遍对照脚本（Linux 版跑其中 RECT_LZ4 那一段），结果要和协议文档一致；
 测你自己的上位机：运行 `tools/fwsim/build/fwsim`，把它打印的 `/dev/ttys…` 当串口打开就行，按键可以从它的 stdin 注入（`tap 3`）。
 提交改动前请跑一遍 `sh fw/link/test.sh`、`python3 -m unittest discover -s tools/host-ref` 和 `sh tools/fwsim/run.sh`。
 

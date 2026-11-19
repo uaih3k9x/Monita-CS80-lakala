@@ -75,4 +75,8 @@ POSSIBILITY OF SUCH DAMAGE.
   （`music.163.com` 的 `/api/search/get`、`/api/song/lyric`、`/api/song/detail`）。接口没有公开文档、没有明确许可，
   随时可能失效或被限流；歌词和封面的版权归原权利人，仓库里不包含任何歌词或封面，只在用户本机缓存（`~/.monita-cs80/lyrics/`）。
 - `linux/` 运行时用到的 Python 包都由用户自己从系统包管理器安装，仓库不包含其代码：
-  Pillow（MIT-CMU / HPND）、jeepney（MIT）、pyusb（BSD-3-Clause）、pyserial（BSD-3-Clause，可选）。
+  Pillow（MIT-CMU / HPND）、jeepney（MIT）、pyusb（BSD-3-Clause）、pyserial（BSD-3-Clause，可选）、
+  python-lz4（`lz4`，BSD-3-Clause，`Copyright (c) 2012-2013, Steeve Morin`；可选，fw v11 的 RECT_LZ4 用，`tools/host-ref` 和 `tools/lz4bench` 也用它；
+  它自带的 liblz4 是 BSD-2-Clause）。没装就照发不压缩的 RECT。
+- 固件里的 LZ4 解码器（`fw/link/lz4.h`）是照公开的 LZ4 Block Format 规范自己写的，不含 liblz4 或其它第三方代码；
+  Mac 版压缩用 macOS 自带的 Compression 框架（`COMPRESSION_LZ4_RAW`），不随仓库分发。

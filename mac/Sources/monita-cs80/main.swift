@@ -67,6 +67,8 @@ var ledOn = true
 var pngClock = false
 var immersiveFlag = false
 var segPngPath: String?
+/// fw v11：不发 RECT_LZ4（A/B 对比整帧快慢）
+var lz4Flag = true
 do {
     var args = CommandLine.arguments.dropFirst().makeIterator()
     while let a = args.next() {
@@ -95,8 +97,9 @@ do {
         case "--clock": pngClock = true
         case "--immersive": immersiveFlag = true
         case "--seg-png": segPngPath = args.next()
+        case "--no-lz4": lz4Flag = false
         default:
-            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock|--immersive] [--immersive]")
+            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock|--immersive] [--immersive] [--no-lz4]")
             exit(a == "-h" || a == "--help" ? 0 : 2)
         }
     }
@@ -433,10 +436,13 @@ if let png = pngPath {
 }
 
 let link: DeviceLink? = deviceSpec.map { spec in
+    let l: DeviceLink
     switch spec {
-    case .serial(let path): return DeviceLink(name: path) { SerialPort(path: path) }
-    case .usb(let n): return DeviceLink(name: n.map { "usb:\($0)" } ?? "usb") { openUsb(interface: n) }
+    case .serial(let path): l = DeviceLink(name: path) { SerialPort(path: path) }
+    case .usb(let n): l = DeviceLink(name: n.map { "usb:\($0)" } ?? "usb") { openUsb(interface: n) }
     }
+    l.lz4 = lz4Flag
+    return l
 }
 if bench || conformance {
     guard let link else { print("--bench / --conformance 要配 --device"); exit(2) }

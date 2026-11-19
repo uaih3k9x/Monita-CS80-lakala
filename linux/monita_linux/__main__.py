@@ -24,6 +24,7 @@ def parse_args(argv=None):
     ap.add_argument("--sample", help="配 --png：用这份 JSON 样例（mac/Samples/*.json 的格式）")
     ap.add_argument("--at", type=float, help="配 --sample：进度（秒）")
     ap.add_argument("--clock", action="store_true", help="配 --png：画时钟页")
+    ap.add_argument("--no-lz4", action="store_true", help="不发 RECT_LZ4（fw v11 的压缩推帧；没装 python3-lz4 时本来就不发）")
     ap.add_argument("-v", "--verbose", action="store_true")
     return ap.parse_args(argv)
 
@@ -76,7 +77,7 @@ def build(args):
     except Exception as e:                              # 没装 jeepney / 没有会话总线（linger、ssh）
         log.warning("MPRIS 不可用（%s）：只显示时钟 / 未在播放", e)
         source = NoSource()
-    session = Session(lambda: open_device(args.device))
+    session = Session(lambda: open_device(args.device), lz4=not args.no_lz4)
     app = App(session, MprisLyrics(source), renderer, player=source, volume=volume.detect(), stats=stats.Stats("/"),
               page=args.page, tick=args.tick)
     try:

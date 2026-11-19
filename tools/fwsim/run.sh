@@ -1,8 +1,8 @@
 #!/bin/sh
 # 不用设备测上位机: 编固件模拟器 (fwsim), Python 参考实现和 Mac 渲染器 (Swift, debug 构建) 各跑一遍对照脚本,
-# 结果要和 docs/protocol.md 一致、两边也一致。见 tools/fwsim/conformance.py。
-#   sh tools/fwsim/run.sh                # Python + Swift (没有 swift 就只测 Python)
-#   sh tools/fwsim/run.sh --python-only
+# Linux 上位机 (linux/) 跑其中 HELLO + RECT_LZ4 那一段; 结果要和 docs/protocol.md 一致、几个上位机之间也一致。见 tools/fwsim/conformance.py。
+#   sh tools/fwsim/run.sh                # Python + Swift + Linux (没有 swift 就不测 Swift)
+#   sh tools/fwsim/run.sh --python-only  # 不测 Swift
 set -eu
 cd "$(dirname "$0")/../.."
 mkdir -p tools/fwsim/build

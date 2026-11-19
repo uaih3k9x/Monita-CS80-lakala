@@ -201,6 +201,80 @@ class Push(unittest.TestCase):
         self.assertNotIn(ml.COPY, fac2.links[0].types())
 
 
+def lz4_make(caps=0x1FF, **kw):
+    s, fac, clk = make(**kw)
+    fac_link = fac.link
+
+    def withcaps(port):
+        lk = fac_link(port)
+        lk.info_reply["caps"] = caps
+        return lk
+    s.link_factory = withcaps
+    s.connect_if_needed()
+    return s, fac, clk
+
+
+def rect_types(lk):
+    return [t for t, _ in lk.frames if t in (ml.RECT, ml.RECT_LZ4)]
+
+
+@unittest.skipUnless(ml.lz4_available(), "没装 python lz4")
+class Lz4(unittest.TestCase):
+    """fw v11 RECT_LZ4：caps bit8 才发；压缩后 < 3/4 才发；推坏了到下次 HELLO 前只发 RECT"""
+
+    def test_full_frame_compressed_and_decodes_back(self):
+        import lz4.block
+        s, fac, clk = lz4_make()
+        fb = bytes([1, 2, 3, 4]) * (800 * 1280 // 2)
+        self.assertTrue(s.push(fb, ml.full_rects(), 1))
+        lk = fac.links[0]
+        self.assertEqual(rect_types(lk), [ml.RECT_LZ4] * 64)
+        got = bytearray(len(fb))
+        for t, p in lk.frames:
+            if t != ml.RECT_LZ4:
+                continue
+            x, y, w, h, raw = struct.unpack_from("<4HI", p)
+            self.assertEqual(raw, w * h * 2)
+            px = lz4.block.decompress(p[12:], uncompressed_size=raw)
+            for r in range(h):
+                o = ((y + r) * 800 + x) * 2
+                got[o:o + w * 2] = px[r * w * 2:(r + 1) * w * 2]
+        self.assertEqual(bytes(got), fb)
+
+    def test_old_firmware_or_disabled_sends_rect(self):
+        s, fac, clk = lz4_make(caps=0xFF)
+        s.push(FB, ml.full_rects(), 1)
+        self.assertEqual(rect_types(fac.links[0]), [ml.RECT] * 64)
+        s2, fac2, _ = lz4_make(lz4=False)
+        s2.push(FB, ml.full_rects(), 1)
+        self.assertEqual(rect_types(fac2.links[0]), [ml.RECT] * 64)
+
+    def test_incompressible_rect_stays_rect(self):
+        s, fac, clk = lz4_make()
+        fb = bytearray(FB)
+        x = 1
+        for i in range(32 * 16 * 2):                                   # 第一个 tile 是噪声
+            x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+            r, c = divmod(i, 64)
+            fb[r * 1600 + c] = x >> 16 & 0xFF
+        s.push(bytes(fb), [(0, 0, 32, 16), (32, 0, 32, 16)], 1)
+        self.assertEqual(rect_types(fac.links[0]), [ml.RECT, ml.RECT_LZ4])
+
+    def test_failed_lz4_batch_disables_until_hello(self):
+        s, fac, clk = lz4_make()
+        lk = fac.links[0]
+        lk.errs = 1
+        self.assertFalse(s.push(FB, ml.full_rects(), 1))
+        lk.frames.clear()
+        self.assertTrue(s.push(FB, ml.full_rects(), 2))               # 恢复的整帧走普通 RECT
+        self.assertEqual(rect_types(lk), [ml.RECT] * 64)
+        s.suspend(); s.resume()                                        # 下一条之前重新 HELLO
+        self.assertTrue(s.connect_if_needed())
+        lk.frames.clear()
+        s.push(FB, ml.full_rects(), 3)
+        self.assertEqual(rect_types(lk), [ml.RECT_LZ4] * 64)
+
+
 class Caps(unittest.TestCase):
     def _caps(self, caps):
         s, fac, clk = make()

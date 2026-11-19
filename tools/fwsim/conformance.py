@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""上位机对照测试: 固件模拟器 (fwsim) × Python 参考实现 (tools/host-ref) × Swift (mac/, monita-cs80 --conformance)。
+"""上位机对照测试: 固件模拟器 (fwsim) × Python 参考实现 (tools/host-ref) × Swift (mac/, monita-cs80 --conformance)
+× Linux 上位机 (linux/, Session; 只跑 HELLO + RECT_LZ4 那一段, 见 linux_session)。
 
 每种模拟器配置起一个干净的 fwsim, 两个上位机各跑一遍同样的脚本 (HELLO、整帧 / COPY / FBCRC、SEG、LED、
 按键注入、未知 type、DIAG、坏帧、沉浸模式 ...), 结果和 expected() (照 docs/protocol.md 写的) 逐项对比,
@@ -47,6 +48,63 @@ def le16(vals):
 
 def frame_a():
     return bytearray(le16(pat_a(x, y) for y in range(H) for x in range(W)))
+
+
+# ---- RECT_LZ4 (fw v11) 用的两种画面: 和 Conformance.swift 的 patUI / patNoise 逐像素一致 ----
+# UI 画面每条都压得很小 (几十倍), 噪声一点都压不动: 不管 liblz4 还是 Apple 的编码器, "< 3/4 才发" 的判定都一样
+
+def pat_ui(x, y):
+    if 100 <= x < 700 and 300 <= y < 700:
+        return 0xFFFF
+    return 0x18E3 if y < 900 else (y // 20 * 0x0841) & 0xFFFF
+
+
+def pat_noise(x, y):
+    h = (x * 0x9E3779B1 ^ y * 0x85EBCA77) & 0xFFFFFFFF
+    h ^= h >> 15
+    h = (h * 0x2C1B3C6D) & 0xFFFFFFFF
+    h ^= h >> 12
+    return h & 0xFFFF
+
+
+def frame_ui():
+    return bytes(le16(pat_ui(x, y) for y in range(H) for x in range(W)))
+
+
+def frame_mixed():
+    """上半屏 (y < 640) 噪声 + 下半屏 UI: 640 行在 20 行 / 10 行两种条带下都对齐, 正好一半条带压缩"""
+    return bytes(le16(pat_noise(x, y) if y < 640 else pat_ui(x, y) for y in range(H) for x in range(W)))
+
+
+# 坏的 RECT_LZ4: 一条 800×20, 块里第一个 match 的 offset 是 0
+BAD_LZ4 = struct.pack("<HHHHI", 0, 0, 800, 20, 32000) + bytes([0x10, 0xAB, 0x00, 0x00, 0x00])
+
+
+def lz4_section(push, fbcrc_full, send_bad, rehello, probe):
+    """RECT_LZ4 那一段, 三个上位机一样的步骤 (Swift 版在 Conformance.swift lz4Session)。先 HELLO 清计数, 之后每步看
+    固件里成功的 RECT_LZ4 条数和 bad_param (Probe "lz4_*")。push(fb, full) 返回推成没有; fbcrc_full() = 屏上整帧 CRC"""
+    ui, mixed = frame_ui(), frame_mixed()
+    c_ui, c_mixed = zlib.crc32(ui) & 0xFFFFFFFF, zlib.crc32(mixed) & 0xFFFFFFFF
+    r = {}
+    rehello()
+    probe("lz4_hello")
+    r["full"] = [push(ui, True), fbcrc_full() == c_ui]                 # 整帧都压缩
+    probe("lz4_full")
+    r["mixed"] = [push(mixed, True), fbcrc_full() == c_mixed]          # 一半压缩一半 RECT
+    probe("lz4_mixed")
+    send_bad()                                                         # 坏块: 计 bad_param, 屏上不动
+    r["bad"] = [push(mixed, False), fbcrc_full() == c_mixed]
+    probe("lz4_bad")
+    send_bad()                                                         # 坏块 + 一批带 RECT_LZ4 的整帧: 这批算推坏了
+    r["fail"] = push(ui, True)
+    probe("lz4_fail")
+    r["recover"] = [push(mixed, True), fbcrc_full() == c_mixed]        # 上位机推整帧恢复: 到下次 HELLO 前只发 RECT
+    probe("lz4_recover")
+    rehello()
+    probe("lz4_hello2")
+    r["again"] = [push(ui, True), fbcrc_full() == c_ui]                # HELLO 之后又发 RECT_LZ4
+    probe("lz4_again")
+    return r
 
 
 def region_crc(fb, x, y, w, h, width=W):
@@ -190,6 +248,10 @@ class Probe:
             v = dict(asleep=st["asleep"], backlight=st["backlight"], seg_en=st["seg_en"], seg_off=st["seg_off"], link_up=st["link_up"],
                      boot_live=st["boot_live"], led=led_state(st), clk=True if d <= 2 else hms(st["clk_sod"]),
                      seg_clock=clock or seg_text(fg))
+        elif label.startswith("lz4_"):                       # RECT_LZ4 段: [成功的 RECT_LZ4 条数, bad_param] (HELLO 起算)
+            if label.startswith("lz4_hello"):                # 段里的 HELLO 带固定时刻: 时钟从这里重新算
+                self.hello_at = (t, st["clk_sod"])
+            v = [st["lz4_rects"], st["bad_param"]]
         elif label == "end":                                 # 会话结束: 时钟按秒走; SEG 5 s 没续就回本地时钟
             if self.seg_at is not None:
                 time.sleep(max(0.0, self.seg_at + 6.2 - time.monotonic()))
@@ -291,6 +353,13 @@ def python_session(sim, probe, now):
                        fbcrc_ok=fbcrc(0, 0, W, H)["extra"] == region_crc(b, 0, 0, W, H),
                        sub_fbcrc_ok=fbcrc(41, 40, 33, 17)["extra"] == region_crc(b, 41, 40, 33, 17))
     res["fbcrc_bad"] = fbcrc(799, 0, 2, 1)["status"]
+
+    def rehello():
+        link.hello()
+        base[0] = 0                                           # HELLO 清了设备的计数
+    res["lz4"] = lz4_section(
+        lambda fb, full: push(fb, ml.full_rects(max_payload=link.max_rect_payload()) if full else [], 20),
+        lambda: fbcrc(0, 0, W, H)["extra"], lambda: link.send(ml.RECT_LZ4, BAD_LZ4), rehello, probe)
 
     res["seg"] = [link.call(ml.SEG, SEG_PAT)["status"], link.call(ml.SEG, bytes(71))["status"]]
     probe("seg")
@@ -407,6 +476,32 @@ def python_imm(link, push, fbcrc, a, base, probe):
     return r
 
 
+# ---- Linux 上位机 (linux/monita_linux/session.py): 走它自己的 Session.push (切条带 / caps 门控 / 推坏了暂停 LZ4) ----
+
+def linux_session(sim, probe, now):
+    sys.path.insert(0, os.path.join(ROOT, "linux"))
+    import logging
+    logging.getLogger("monita").addHandler(logging.NullHandler())   # "推坏了暂停 LZ4" 是脚本故意造的, 别刷屏
+    logging.getLogger("monita").propagate = False
+    from monita_linux.session import Session
+    s = Session(lambda: ml.open_port(sim.pty), clock=lambda: now, stale_after=None)
+    if not s.connect_if_needed():
+        return {"error": "HELLO 失败"}
+    probe("hello")
+    res = {"hello": {k: s.info[k] for k in ("proto", "fw", "w", "h", "pixfmt", "seg_bytes", "caps", "max_payload")}}
+    maxp = lambda: min(s.info["max_payload"], 32768)
+
+    def rehello():
+        s.forced = True
+        s.connect_if_needed()
+    res["lz4"] = lz4_section(
+        lambda fb, full: s.push(fb, ml.full_rects(max_payload=maxp()) if full else [], 20),
+        lambda: s.link.call(ml.FBCRC, struct.pack("<HHHH", 0, 0, W, H), timeout=5)["extra"],
+        lambda: s.link.send(ml.RECT_LZ4, BAD_LZ4), rehello, probe)
+    s.link.close()
+    return res
+
+
 # ---- Swift 上位机 ----
 
 def swift_session(sim, probe, now, zone, exe):
@@ -439,7 +534,10 @@ def expected(cfg):
     caps = ml.CAP_FBCRC | ml.CAP_COPY | ml.CAP_KEYS | ml.CAP_LED | ml.CAP_IMMERSIVE | ml.CAP_SLEEP
     caps |= ml.CAP_DOUBLEBUF if nbuf > 1 else 0
     caps |= ml.CAP_TRIBUF if nbuf > 2 else 0
+    lz = cfg.get("lz4", True)
+    caps |= ml.CAP_LZ4 if lz else 0
     strip_rows = (min(mp, 32768) - 8) // (W * 2)
+    n = -(-H // strip_rows)                                   # 整帧条数; mixed 里正好一半压缩
     e = {
         "hello": dict(proto=0, fw=cfg["fw"], w=800, h=1280, pixfmt=1, seg_bytes=72, caps=caps, max_payload=mp),
         # HELLO 清计数: 之后第一条 PING 时 frames = 2 (HELLO + PING), rx_bytes = 这条 PING 的 10 字节
@@ -460,12 +558,19 @@ def expected(cfg):
                        garbage=[1, 0, 0, 15],
                        half=[1, 0, 0, 18]),       # 半截帧 0.5 s 没后续就丢
         "rehello": dict(ok=True, frames=2, rx_bytes=10),
+        # fw v11 RECT_LZ4 (lz4_section): 坏块计 bad_param、屏上不动, 这一批推坏了 (fail) -> 上位机到下次 HELLO 前只发 RECT。
+        # 旧固件 (--no-lz4): 一条 RECT_LZ4 都不发; 脚本自己塞的坏块被当成不认识的 type (回 EUNSUP, 不计错), 每批都推成
+        "lz4": dict(full=[True, True], mixed=[True, True], bad=[not lz, True], fail=not lz, recover=[True, True],
+                    again=[True, True]),
         # fw v10: 带载荷的 SLEEP 被拒, 空的 OK; 醒来 HELLO 清计数
         "sleep": [ml.EPARAM, ml.OK], "wake": dict(frames=2, rx_bytes=10),
         # 模拟器里固件的副作用 (Probe): 开机蓝灯 2 s 亮 1 s 灭 (1.024 ms 单位 2000/1000)、段码屏 "------";
         # HELLO 后小时钟 = 固定时刻在 zone 的当地时间, 灯灭; SEG 原样进显存; LED 生效、被拒的不动它;
         # 再 HELLO: KEY 计数清零、灯灭; 时钟按秒走, SEG 5 s 后回本地时钟
-        "sim": dict(boot=dict(seg="------", clk_valid=0, led=[2, ml.LED_B, 2000, 1000, 0, True], backlight=[1, 1],
+        "sim": dict(lz4_hello=[0, 0], lz4_full=[n if lz else 0, 0], lz4_mixed=[n * 3 // 2 if lz else 0, 0],
+                    lz4_bad=[n * 3 // 2, 1] if lz else [0, 0], lz4_fail=[n * 5 // 2, 2] if lz else [0, 0],
+                    lz4_recover=[n * 5 // 2, 2] if lz else [0, 0], lz4_hello2=[0, 0], lz4_again=[n if lz else 0, 0],
+                    boot=dict(seg="------", clk_valid=0, led=[2, ml.LED_B, 2000, 1000, 0, True], backlight=[1, 1],
                               link_up=0, boot_live=1, boot_screen=1, asleep=0, seg_en=1),
                     hello=dict(clk=True, seg_clock=True, led=[0, True], key_n=0, link_up=1, boot_live=0),
                     seg=dict(fg=True, seg_host_seen=1), keys=dict(seg_held=True), backlight=[0, 2], led=[2, ml.LED_G, 100, 400, 0, True],
@@ -513,7 +618,17 @@ CONFIGS = [
          imm_rows=2720, now=1784141251, zone="Europe/London"), # 19:47:31 BST (+60)
     dict(name="卷轴不够 (IMM_ENTER 被拒)", args=["--imm-rows", "1000"], nbuf=3, max_payload=32768, imm_rows=1000,
          now=1768950309, zone="Australia/Adelaide"),          # 2026-01-20 23:05:09Z = 次日 09:35:09 ACDT (+630)
+    dict(name="旧固件 (没有 RECT_LZ4)", args=["--no-lz4"], nbuf=3, max_payload=32768, imm_rows=2720, lz4=False,
+         now=1784081587, zone="Asia/Tokyo"),                  # 11:13:07 JST (+540)
 ]
+
+LINUX_KEYS = ("hello", "lz4")                                 # Linux 上位机只跑这几段 (+ sim 里的 boot / hello / lz4_* / end)
+
+
+def linux_subset(e):
+    out = {k: e[k] for k in LINUX_KEYS}
+    out["sim"] = {k: v for k, v in e["sim"].items() if k in ("boot", "hello", "end") or k.startswith("lz4_")}
+    return out
 
 
 def fw_ver():
@@ -526,7 +641,8 @@ def fw_ver():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sim", default=os.path.join(ROOT, "tools", "fwsim", "build", "fwsim"))
-    ap.add_argument("--swift", help="monita-cs80 (debug) 路径; 不给就只测 Python")
+    ap.add_argument("--swift", help="monita-cs80 (debug) 路径; 不给就只测 Python (+ Linux)")
+    ap.add_argument("--no-linux", action="store_true", help="不跑 Linux 上位机 (linux/) 那一段")
     args = ap.parse_args()
     fails = 0
     for cfg in CONFIGS:
@@ -538,6 +654,8 @@ def main():
         hosts = [("python", lambda s, p: python_session(s, p, cfg["now"]))]
         if args.swift:
             hosts.append(("swift", lambda s, p: swift_session(s, p, cfg["now"], cfg["zone"], args.swift)))
+        if not args.no_linux:
+            hosts.append(("linux", lambda s, p: linux_session(s, p, cfg["now"])))
         for host, run in hosts:
             sim = Sim(args.sim, cfg["args"])
             t0 = time.monotonic()
@@ -550,21 +668,30 @@ def main():
                 st = sim.stat()
             finally:
                 sim.close()
-            d = diff(want, got[host])
+            d = diff(linux_subset(want) if host == "linux" else want, got[host])
             # 模拟器这边: 只有 op 8 那一条旧 DIAG 收拢过多缓冲 (空 DIAG 不算); 最后回到普通模式、块数复原
             for k, v in (("collapse", 1), ("imm", 0), ("nbuf", cfg["nbuf"])):
+                if host == "linux" and k == "collapse":           # Linux 段里没有旧 DIAG
+                    v = 0
                 if st[k] != v:
                     d.append("模拟器 %s: 应为 %r, 实际 %r" % (k, v, st[k]))
             print("%-4s %-7s %-28s %.1f s" % ("OK" if not d else "FAIL", host, cfg["name"], time.monotonic() - t0))
             for line in d:
                 print("       " + line)
             fails += len(d)
-        if len(got) == 2:
+        if "swift" in got:
             d = diff(got["python"], got["swift"])
             print("%-4s python == swift (%s)" % ("OK" if not d else "FAIL", cfg["name"]))
             for line in d:
                 print("       " + line)
             fails += len(d)
+        if "linux" in got:                                    # Linux 跑的那几段和 Python (和 Swift) 逐项一样
+            for other in [h for h in ("python", "swift") if h in got]:
+                d = diff(linux_subset(got[other]), got["linux"])
+                print("%-4s %s == linux (%s)" % ("OK" if not d else "FAIL", other, cfg["name"]))
+                for line in d:
+                    print("       " + line)
+                fails += len(d)
     print("conformance: %s" % ("all OK" if not fails else "%d 处不一致" % fails))
     return 1 if fails else 0
 

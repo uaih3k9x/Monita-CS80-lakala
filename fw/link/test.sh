@@ -4,6 +4,9 @@ cd "$(dirname "$0")"
 out=$(mktemp)
 cc -std=c99 -Wall -Wextra -Werror -O1 -o "$out" test_proto.c
 "$out"; rc=$?
+# LZ4 解码器: ASan + UBSan 编, 模糊测试 (默认 30 万次; LZ4_FUZZ=N 改)
+[ $rc -eq 0 ] && cc -std=c99 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -o "$out" test_lz4.c \
+  && "$out" ${LZ4_FUZZ:-300000}; rc=$?
 for t in test_zc_logic.c test_blit.c test_tribuf.c test_keys.c test_led.c test_linkwd.c test_imm.c test_dispatch.c; do
   [ $rc -eq 0 ] && cc -std=c99 -Wall -Wextra -Werror -O1 -I. -o "$out" "$t" && "$out"; rc=$?
 done
@@ -19,4 +22,4 @@ if [ $rc -eq 0 ]; then
   && cc -std=c99 -Wall -Wextra -Werror -O1 -I../lcd -o "$out" test_bootscreen.c && "$out" "$tmp"; rc=$?
   rm -rf "$tmp"
 fi
-rm -f "$out"; exit $rc
+rm -rf "$out" "$out.dSYM"; exit $rc

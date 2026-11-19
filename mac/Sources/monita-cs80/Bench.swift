@@ -66,6 +66,7 @@ func runBench(_ link: DeviceLink) -> Bool {
     let avg = times.dropFirst().reduce(0, +) / Double(times.count - 1)
     print(String(format: "  整帧 %d 条 RECT + PRESENT，线上 %d B：平均 %.1f ms（%.2f MB/s），各次 %@", rects.count, wire, avg,
                  Double(wire) / avg / 1000, times.map { String(format: "%.0f", $0) }.joined(separator: "/")))
+    print("  其中 RECT_LZ4 \(link.lastPushLz4) 条（fw v11；测试图压不动时照发 RECT，线上字节按 RECT 算；--no-lz4 关掉）")
     if let a = link.request(LinkType.ping).flatMap(AckStats.init) {
         check(a.crcErr + a.lenErr + a.badParam == 0, "设备统计 rx=\(a.rxBytes) frames=\(a.frames) rects=\(a.rects) presents=\(a.presents) crc_err=\(a.crcErr) len_err=\(a.lenErr) bad=\(a.badParam)")
     }

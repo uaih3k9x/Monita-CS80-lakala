@@ -1,7 +1,8 @@
 # 上位机 ↔ R05 固件协议 v0
 
 > 状态：**v0，已实现并实机跑通**（固件 `fw/app.c` + `fw/link/proto.h`，参考上位机 `tools/host-ref/`、`mac/`）。
-> fw v8 加的 KEY / LED、fw v9 加的沉浸模式 IMM_*、fw v10 加的 SLEEP / 主机走了回开机画面都是向后兼容的增量（`caps` 新位，`proto_ver` 不变），**还没上机**。
+> fw v8 加的 KEY / LED、fw v9 加的沉浸模式 IMM_*、fw v10 加的 SLEEP / 主机走了回开机画面、fw v11 加的 RECT_LZ4（压缩的 RECT）
+> 都是向后兼容的增量（`caps` 新位，`proto_ver` 不变：旧上位机照旧能用新固件，新上位机看 `caps` 降级），**还没上机**。
 > 协议与平台无关：能打开 USB 串口、能画一张 800×1280 的图，就能当上位机。以后改动会升 `proto_ver`。
 
 设计原则：**简单、流式、设备侧不需要大缓冲**。设备 app 只有 128 KiB RAM，一帧 payload 最多 32 KiB，
@@ -40,9 +41,10 @@ CRC-32/IEEE 就是 zlib / PNG / Ethernet 用的那个（Python `zlib.crc32`，`"
 
 半截帧超过 0.5 s 没有后续字节也丢掉。主机侧拆设备回包时可以更宽松（参考实现都是坏帧前进 1 字节重新找同步）。
 
-**应答规则：除了 RECT / COPY / IMM_RECT，每一条合法的主机帧都恰好有一条应答**（HELLO → HELLO_ACK，DIAG → DIAG_R，其余 → ACK）。
-RECT / COPY / IMM_RECT 不应答（被拒也不应答，只计 `bad_param`），所以可以连续成批地写，不用等；之后任何一条有应答的消息
-（PRESENT、IMM_SCROLL、PING）的 ACK 都是同步点。沉浸模式里被拒的 RECT / COPY 同样不应答。
+**应答规则：除了 RECT / RECT_LZ4 / COPY / IMM_RECT，每一条合法的主机帧都恰好有一条应答**（HELLO → HELLO_ACK，DIAG → DIAG_R，其余 → ACK）。
+RECT / RECT_LZ4 / COPY / IMM_RECT 不应答（被拒也不应答，只计 `bad_param`），所以可以连续成批地写，不用等；之后任何一条有应答的消息
+（PRESENT、IMM_SCROLL、PING）的 ACK 都是同步点。沉浸模式里被拒的 RECT / RECT_LZ4 / COPY 同样不应答。
+（没有 RECT_LZ4 的旧固件把 0x23 当不认识的 type，回 ACK `status` = 3；所以上位机只在 `caps` bit8 置位时发它。）
 
 设备主动发的只有 KEY（0x90，`seq` = 0），可能夹在任何两条应答之间。主机拆帧时按 type 分开：等应答时把 KEY 交给按键处理，不要丢；
 不认识 KEY 的旧上位机按 type + seq 过滤应答，会自然忽略它。
@@ -56,6 +58,7 @@ RECT / COPY / IMM_RECT 不应答（被拒也不应答，只计 `bad_param`），
 | 0x20 | → | RECT | `u16 x, y, w, h` + `w×h` 个 RGB565（行优先，小端） | 无 |
 | 0x21 | → | PRESENT | `u16 frame_id` | ACK（extra = 提交耗时 µs） |
 | 0x22 | → | COPY | `u16 sx, sy, w, h, dx, dy`（fw v2，`caps` bit2） | 无 |
+| 0x23 | → | RECT_LZ4 | `u16 x, y, w, h, u32 raw_len` + LZ4 raw block（fw v11，`caps` bit8，见下） | 无 |
 | 0x30 | → | BACKLIGHT | `u8 on`（0 灭，非 0 亮） | ACK |
 | 0x31 | → | LED | `u8 mask, u8 mode, u16 period_ms, u16 on_ms, u16 duration_ms`（fw v8，`caps` bit5，见下） | ACK |
 | 0x32 | → | SLEEP | 空（fw v10，`caps` bit7，见"主机走了 / 休眠"） | ACK |
@@ -89,7 +92,7 @@ u8  pixfmt        1 = RGB565 小端 (R 在高 5 位)
 u8  seg_bytes     72
 u16 caps          bit0 FBCRC；bit1 DOUBLEBUF（双缓冲，见 PRESENT）；bit2 COPY（fw v2）；bit3 TRIBUF（三缓冲，fw v6）；
                   bit4 KEYS（按键上报，fw v8）；bit5 LED（状态灯，fw v8）；bit6 IMMERSIVE（沉浸模式，fw v9）；
-                  bit7 SLEEP（SLEEP + 主机走了回开机画面，fw v10）
+                  bit7 SLEEP（SLEEP + 主机走了回开机画面，fw v10）；bit8 LZ4（RECT_LZ4，fw v11）
 u16 max_payload   32768
 u16 0
 ```
@@ -108,9 +111,9 @@ u32 rx_bytes      HELLO 以来收到的字节
 u32 frames        合法帧数
 u32 crc_err       CRC 错的帧
 u32 len_err       长度超限的帧
-u32 rects         成功写入的 RECT / COPY / IMM_RECT
+u32 rects         成功写入的 RECT / RECT_LZ4 / COPY / IMM_RECT
 u32 presents
-u32 bad_param     被拒的 RECT / COPY / IMM_RECT (越界 / 长度不对 / 沉浸模式里的 RECT、COPY / 不带 bit0 写屏上的行)
+u32 bad_param     被拒的 RECT / RECT_LZ4 / COPY / IMM_RECT (越界 / 长度不对 / 坏的 LZ4 块 / 沉浸模式里的 RECT、RECT_LZ4、COPY / 不带 bit0 写屏上的行)
 u32 uptime        设备开机时间，单位 1.024 ms
 u32 extra         依消息而定：PRESENT 提交耗时 µs；FBCRC 这块像素的 CRC；IMM_ENTER 卷轴行数 R；
                   IMM_EXIT 退出后的 caps；IMM_SCROLL 正在扫描的窗口顶（还没生效的跳转 / 动画开始前的值）；其余 0
@@ -129,6 +132,33 @@ u8  pixels[w*h*2]    RGB565 小端，行优先；payload 长度必须正好 8 + 
 - 坐标、大小随意，不要求对齐。一个 RECT 的 payload ≤ max_payload：整行宽（800）的条带一次最多 20 行（32008 B），整帧 = 64 条。
 - 上位机常见做法：32×16 tile 差分，把同一 tile 行里相邻的脏 tile 合并成一个矩形发（参考实现都这么做）。
 - 设备收齐一帧、CRC 对了才写，坏帧不会把垃圾写进画面。
+
+### RECT_LZ4（0x23，fw v11，`caps` bit8）
+
+和 RECT 一样的矩形，像素换成 LZ4 压缩。UI 画面大片纯色，整帧 2000 KB 压到 30–90 KB（下面"实测"），整帧（开机、唤醒、重连、切页、锁屏切换）
+从受 USB 限制的 ≈ 320–390 ms 降下来。
+
+```
+u16 x, y, w, h       矩形, 规则同 RECT (完全在屏内, w、h ≥ 1)
+u32 raw_len          解压后的字节数, 必须正好 = w*h*2, 且 ≤ max_payload - 8 (和同一块的 RECT 一样大)
+u8  block[]          LZ4 raw block (LZ4 Block Format, 不是 frame 格式: 没有魔数 / 帧头 / 校验), 解出来是 w*h 个 RGB565 (行优先, 小端)
+```
+
+- 块格式是公开的 LZ4 Block Format（token + 字面量 + u16 小端 offset + 长度扩展；最后一个序列只有字面量）。
+  liblz4 `LZ4_compress_default` / python `lz4.block.compress(data, store_size=False)` / Apple Compression `COMPRESSION_LZ4_RAW` 的输出都直接能用。
+- 固件（`fw/link/lz4.h`，自己写的解码器）**先把整块解进 32 KiB 的暂存区**，所有边界都在写之前检查，
+  再走 RECT 原来的路径落进帧缓冲。所以坏块不会把任何像素写进画面，计 `bad_param`、不应答（同 RECT）。坏块包括：
+  解出来的长度 ≠ `raw_len`、`raw_len` ≠ `w*h*2` 或 > `max_payload - 8`、输入截断（token / 长度扩展 / 字面量 / offset 读出界，或以 match 结尾）、
+  输出越界、match offset 为 0 或超出已解出的字节、块后面还有多余字节。编码端约定（最后 5 字节是字面量、最后 12 字节里不起 match）不强制。
+- 不应答的理由同 RECT：整帧 64 条连着写，只在 PRESENT 等一次；出错从 PRESENT 的 ACK 看（`crc_err + len_err + bad_param` 变多了 → 推整帧）。
+- 沉浸模式里同 RECT：计 `bad_param`。开机版权页同 RECT：第一条 RECT_LZ4 之后 HELLO 不再改 Link 行。
+- **上位机规则**（三个参考实现一样）：
+  - 只在 HELLO_ACK `caps` bit8 置位时发；矩形照 RECT 的规则切（payload ≤ max_payload，整行宽 20 行一条）；
+  - 每个矩形压缩后**严格小于原始的 3/4** 才发 RECT_LZ4，否则照发 RECT（小块、噪声、照片压不动）；
+  - 一批里有 RECT_LZ4 而 PRESENT 的 ACK 出错计数涨了（或 status ≠ 0）：**到下一次 HELLO 前只发 RECT**。
+    这样万一编码器 / 解码器真有不一致，"推整帧恢复"会走普通 RECT，不会一直失败。
+  - 压缩库是可选依赖：Python（`tools/host-ref`、`linux/`）用 python `lz4`（`pip install lz4` / `python3-lz4`），没装就只发 RECT；
+    Mac 用系统自带的 Compression 框架。三个上位机都可以 `--no-lz4` 关掉，用来 A/B 对比。
 
 ### COPY（0x22，fw v2）
 
@@ -257,7 +287,7 @@ IMM_EXIT（或任何一条 HELLO）把当前画面抄回原厂 fb 显示、还�
   搬的行不和屏上的重叠就直接搬、切一次基址；否则先把当前窗口抄进保留缓冲、切过去，卷轴整个不可见了再搬、再切回来。
   屏上内容自始至终不变，不可见、不撕裂。动画停稳 200 ms 后、前面剩的行不到一半时主动做；IMM_RECT / IMM_SCROLL 需要时也会就地做
   （耗时 1–2 帧 + 搬运，整屏 ≈ 30 ms）。逻辑坐标不变。
-- 沉浸模式下 RECT / COPY 计 `bad_param`，PRESENT 回 `status` = 1，DIAG 回 `status` = 3；FBCRC 校验屏上那一段（坐标相对屏幕）；SEG / LED / BACKLIGHT / SLEEP / PING 照常。
+- 沉浸模式下 RECT / RECT_LZ4 / COPY 计 `bad_param`，PRESENT 回 `status` = 1，DIAG 回 `status` = 3；FBCRC 校验屏上那一段（坐标相对屏幕）；SEG / LED / BACKLIGHT / SLEEP / PING 照常。
 - 时间按 1.024 ms 计（同 LED），`dur_ms` 实际长 2.4%。
 
 参考做法（`mac/`，`--immersive` 开机就进；fw v9 时代的"长按查询键切换"已去掉，容易误触）：歌词按句排成一列"块"（头部歌名 + 每句一块 + 尾部留白），
@@ -299,12 +329,40 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 | PING 往返 | ≈ 0.4 ms |
 | 丢包 / CRC 错 | 0（连续 16 MB、数百帧）；整帧回读 CRC 一致 |
 
-整帧是少数情况（切页、重连），日常是小块差分，所以 v0 不做压缩。
+整帧是少数情况（切页、重连），日常是小块差分，所以 v0 不做压缩；fw v11 加了 RECT_LZ4（见下）。
+
+### RECT_LZ4 的基准（fw v11，主机上测；设备侧是**估计，等真机验证**）
+
+`python3 tools/lz4bench/bench.py`：12 张真实渲染帧（`docs/img`、`linux/docs/img` 的 800×1280 截图），按上位机的切法（整行宽 20 行一条，32000 B 原始）压缩。
+
+| 帧 | 整帧一块压 | 64 条带（liblz4，线上） | 64 条带（Apple Compression） | 倍数（liblz4 条带） |
+|---|---|---|---|---|
+| docs/img/lock.png | 26 KB | 29 KB | 37 KB | 68× |
+| docs/img/clock.png | 46 KB | 54 KB | 66 KB | 37× |
+| docs/img/lyrics-playing.png | 73 KB | 83 KB | 98 KB | 24× |
+| docs/img/immersive.png | 87 KB | 94 KB | 111 KB | 21× |
+| linux/docs/img/idle.png | 38 KB | 45 KB | 58 KB | 44× |
+| linux/docs/img/lyrics-paused.png | 79 KB | 89 KB | 106 KB | 22× |
+| 12 张平均 | | 65 KB | ≈ 80 KB | ≈ 31× |
+
+- 主机压缩一整帧：liblz4 0.2–0.8 ms、Apple 0.2–0.7 ms（M 系列 Mac）；64 条都过了 3/4 门槛。
+- 线上 65 KB / 帧，按实测链路 6.4 MB/s 约 **10 ms**（RECT 整帧 2049 KB ≈ 320 ms）。
+- 解出来 99% 是 match（每帧约 1.2 万个序列、字面量约 18 KB）；offset 1 / 2（单色）占 match 字节 16–71%，其余多是 offset 1600（上一行）。
+  固件按字写的两条快路径（offset 1 / 2、offset 是 4 的倍数）覆盖 96% 的 match 字节。
+- 固件解码器在主机上（同一份 `fw/link/lz4.h`，-O2）解一整帧 0.05–0.3 ms，解 + 拷进帧缓冲 0.07–0.3 ms。
+- **A5 估计**（UIS8910DM 的 Cortex-A5，主频按 400–500 MHz 估；周期数是拍脑袋的数量级）：逐字节 ~5 周期 / 字节、按字 ~6 周期 / 4 字节、~40 周期 / 序列
+  → 解码 8–10 ms / 帧（全逐字节的话 21–27 ms）。暂存区 → 帧缓冲的 2 MB 拷贝受 PSRAM 写带宽限制（实测 CPU / DMA 都是 ~64 MB/s）约 31 ms，
+  直接解进帧缓冲也躲不开这 2 MB 写。传输约 10 ms，和解码部分交错（解码时 USB 照样往内核缓冲里收）。
+  **合计估计整帧 40–50 ms（原来 320–390 ms），没上机，等真机验证**：`cs80.py PORT bench 10 docs/img/lock.png docs/img/clock.png` 和加 `--no-lz4` 各跑一次对比。
+- 三缓冲的老代价会露出来：整帧提交之后，**下一批**开头要把新画的那块从刚提交的那块整屏抄回（2 MB，≈ 25–35 ms，`tribuf.h`）。
+  以前被 320 ms 的传输盖住，现在整帧后的第一帧差分会多这一下。
+- 和 liblz4 1.9.4 差分模糊（`bench.py --fuzz 200000`，真实条带的变异块）：结论一致 99.9%，内容从不相异；
+  不一致的全是"块里有 offset 0 的 match"——规范说是坏块，liblz4 的快路径没查、照解，固件拒。
 帧周期 26.6 ms（≈37.5 Hz）。双缓冲下每批占两个帧周期，动画上限约 18–20 fps；fw v6 三缓冲上限 37.5 fps，Mac 实测歌词滚动 41 ms/帧（≈ 24 fps）。
 
 ## 参考实现
 
-- Python：`tools/host-ref/monita_link.py`（协议，覆盖到 fw v10：KEY、LED、沉浸模式 IMM_*、SLEEP）+ `cs80.py`（命令行：hello / ping / pattern / png / bench / diffdemo / seg / backlight / sleep / teartest / scrollbench / tri / e0 / e1 / zc）。
+- Python：`tools/host-ref/monita_link.py`（协议，覆盖到 fw v11：KEY、LED、沉浸模式 IMM_*、SLEEP、RECT_LZ4）+ `cs80.py`（命令行：hello / ping / pattern / png / bench / diffdemo / seg / backlight / sleep / teartest / scrollbench / tri / e0 / e1 / zc）。
   串口优先用 pyserial，没装时 POSIX 上用 termios；推 PNG 要 Pillow。`python3 -m unittest discover -s tools/host-ref`。
 - Swift：`mac/Sources/MonitaCore/Link.swift`（纯逻辑，有测试）+ `mac/Sources/monita-cs80/UsbLink.swift`（macOS IOKit，接口 7）/ `SerialLink.swift`（termios 串口，Linux 等），
   渲染器 `monita-cs80 --device usb`（或 `--device /dev/ttyUSB0`）。
@@ -315,8 +373,9 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 和段码屏本地时钟（`fw/fg00/segclock.h` + `fgbuf.h`）原样编成主机程序，
 硬件换成假的（3 块帧缓冲、卷轴、按键注入；帧事件立即发生），开一个伪终端当 USB 串口。
 
-- `sh tools/fwsim/run.sh`：Python 参考实现和 Mac 渲染器（debug 构建）各跑一遍同一套脚本（HELLO、整帧 / COPY / FBCRC、SEG、LED、
-  按键、未知 type、DIAG、坏帧、沉浸模式、停发 5 s 回开机画面、SLEEP / 醒来 ...），四种模拟器配置（三 / 单 / 双缓冲 + 16 KiB max_payload / 卷轴不够），
+- `sh tools/fwsim/run.sh`：Python 参考实现和 Mac 渲染器（debug 构建）各跑一遍同一套脚本（HELLO、整帧 / COPY / FBCRC、RECT_LZ4、SEG、LED、
+  按键、未知 type、DIAG、坏帧、沉浸模式、停发 5 s 回开机画面、SLEEP / 醒来 ...），Linux 上位机（`linux/`）跑其中 HELLO + RECT_LZ4 那一段；
+  五种模拟器配置（三 / 单 / 双缓冲 + 16 KiB max_payload / 卷轴不够 / 没有 RECT_LZ4 的旧固件 `--no-lz4`），
   结果和本文档逐项对比，两个上位机之间也要一致；还对拍固件的副作用（设备时钟 / 段码屏显示 / 灯状态机 / 滚动动画 / KEY 计数），
   HELLO 的时间用固定时刻 + 时区注入。细节和变异测试结果见 `tools/fwsim/README.md`。
 - 测自己的上位机：`tools/fwsim/build/fwsim` 第一行打印 `PTY /dev/ttysNNN`，把它当串口打开即可；stdin 发 `tap 3`（按一下 + 键）、
@@ -326,5 +385,5 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 
 - SEG 的高层字段（播放进度由固件外推）。按键事件和状态灯已在 fw v8 加上（KEY / LED）。
 - 沉浸模式的可见写（改颜色）可以"追着扫描线写"做到完全不撕裂：帧事件后按 20.3 µs/行算出扫描线位置，等它扫过矩形再写。需要实机标定相位，暂未做。
-- 如果需要更快的整帧：简单 RLE 作为新的 RECT 编码（新 type，`caps` 新位）。
+- ~~更快的整帧：新的 RECT 编码~~：fw v11 RECT_LZ4。还能做的：整行宽的条带校验过后直接解进帧缓冲（省掉暂存区那一遍，估计省 ~5 ms，要真机数据再说）。
 - ~~双缓冲 PRESENT 的第二次等帧~~：已确认基址帧头锁存，fw v4 起默认立即翻页。

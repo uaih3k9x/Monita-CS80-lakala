@@ -38,8 +38,8 @@ static void test_hello(void){
     CHECK(next_reply() && rx_type == LK_HELLO_ACK && rx_seq == seq && rx_len == 16);
     CHECK(lk_rd16(rx_pl + 0) == LK_PROTO_VER && lk_rd16(rx_pl + 2) == FW_VER);
     CHECK(lk_rd16(rx_pl + 4) == 800 && lk_rd16(rx_pl + 6) == 1280 && rx_pl[8] == 1 && rx_pl[9] == 72);
-    CHECK(FW_VER == 10);
-    CHECK(lk_rd16(rx_pl + 10) == 0xFF && lk_rd16(rx_pl + 12) == 32768);       /* bit7 SLEEP (fw v10) */
+    CHECK(FW_VER == 11);
+    CHECK(lk_rd16(rx_pl + 10) == 0x1FF && lk_rd16(rx_pl + 12) == 32768);      /* bit7 SLEEP (fw v10), bit8 LZ4 (fw v11) */
     CHECK(!next_reply());
 }
 
@@ -230,6 +230,78 @@ static void test_unplug(void){
     while (next_reply()) {}
 }
 
+/* fw v11 RECT_LZ4 (0x23): 和 RECT 一样不应答、计入 rects / bad_param; 坏块不动像素; 沉浸模式里拒; 没有 LZ4 (旧固件) 当不认识的 type */
+static uint32_t ack_u32(int i){ return lk_rd32(rx_pl + 4 + 4 * (uint32_t)i); }   /* 0 rx_bytes 1 frames 2 crc 3 len 4 rects 5 presents 6 bad 7 up 8 extra */
+static void ping_stats(uint32_t *rects, uint32_t *bad){
+    send(LK_PING, 0, 0);
+    CHECK(next_reply() && rx_type == LK_ACK && rx_pl[0] == LK_PING);
+    *rects = ack_u32(4); *bad = ack_u32(6);
+    CHECK(!next_reply());
+}
+/* 一整条 800×20 的单色: 一个字面量像素 + offset 2 的长 match, 最后 0 字面量 */
+static uint32_t solid_lz4(uint8_t *pl, uint32_t y, uint16_t c){
+    lk_wr16(pl, 0); lk_wr16(pl + 2, (uint16_t)y); lk_wr16(pl + 4, 800); lk_wr16(pl + 6, 20); lk_wr32(pl + 8, 32000);
+    uint8_t *b = pl + 12; uint32_t n = 0, ml = 32000 - 2 - 4 - 15;
+    b[n++] = 0x2F; b[n++] = (uint8_t)c; b[n++] = (uint8_t)(c >> 8); b[n++] = 2; b[n++] = 0;
+    while (ml >= 255){ b[n++] = 255; ml -= 255; }
+    b[n++] = (uint8_t)ml; b[n++] = 0x00;
+    return 12 + n;
+}
+static void test_rect_lz4(void){
+    send(LK_HELLO, 0, 0);
+    CHECK(next_reply() && rx_type == LK_HELLO_ACK && (lk_rd16(rx_pl + 10) & LK_CAP_LZ4));
+    uint32_t r0, b0, r1, b1;
+    push_solid(0x1234);
+    uint32_t crc_rect = sim_screen_crc();
+    push_solid(0);
+    ping_stats(&r0, &b0);
+    static uint8_t pl[12 + 400];
+    for (uint32_t y = 0; y < LCD_H; y += 20) send(LK_RECT_LZ4, pl, solid_lz4(pl, y, 0x1234));
+    CHECK(!next_reply());                              /* 不应答 */
+    uint8_t fid[2] = { 2, 0 };
+    send(LK_PRESENT, fid, 2);
+    CHECK(next_reply() && rx_pl[0] == LK_PRESENT && rx_pl[1] == LK_OK);
+    ping_stats(&r1, &b1);
+    CHECK(r1 == r0 + 64 && b1 == b0 && st.lz4 >= 64);
+    CHECK(sim_screen_crc() == crc_rect);               /* 和同样像素的 RECT 一模一样 */
+    /* 坏块: offset 0 / 截断 / raw_len 不对 / 解出来超过 max_payload - 8 -> bad_param, 像素不动 */
+    uint32_t n = solid_lz4(pl, 0, 0xFFFF);
+    pl[12 + 3] = 0; pl[12 + 4] = 0;
+    send(LK_RECT_LZ4, pl, n);
+    n = solid_lz4(pl, 20, 0xFFFF);
+    send(LK_RECT_LZ4, pl, n - 1);
+    n = solid_lz4(pl, 40, 0xFFFF); lk_wr32(pl + 8, 31998);
+    send(LK_RECT_LZ4, pl, n);
+    n = solid_lz4(pl, 60, 0xFFFF); lk_wr16(pl + 6, 21); lk_wr32(pl + 8, 33600);
+    send(LK_RECT_LZ4, pl, n);
+    send(LK_RECT_LZ4, pl, 11);                         /* 头都不够 */
+    fid[0] = 3;
+    send(LK_PRESENT, fid, 2);
+    CHECK(next_reply() && rx_pl[0] == LK_PRESENT);
+    ping_stats(&r0, &b0);
+    CHECK(r0 == r1 && b0 == b1 + 5);
+    CHECK(sim_screen_crc() == crc_rect);
+    /* 沉浸模式里: 同 RECT, 计 bad_param 不应答 */
+    uint8_t y0[4] = { 0 };
+    send(LK_IMM_ENTER, y0, 4);
+    CHECK(next_reply() && rx_pl[1] == LK_OK && g_imm);
+    send(LK_RECT_LZ4, pl, solid_lz4(pl, 0, 1));
+    ping_stats(&r1, &b1);
+    CHECK(r1 == r0 && b1 == b0 + 1);
+    send(LK_IMM_EXIT, 0, 0);
+    CHECK(next_reply() && !g_imm && (lk_rd32(rx_pl + 36) & LK_CAP_LZ4));
+    /* 旧固件 (没有 LZ4): caps 没有 bit8, 0x23 回 ACK EUNSUP (同 v10 的 default) */
+    g_lz4_ok = 0;
+    send(LK_HELLO, 0, 0);
+    CHECK(next_reply() && rx_type == LK_HELLO_ACK && !(lk_rd16(rx_pl + 10) & LK_CAP_LZ4));
+    send(LK_RECT_LZ4, pl, solid_lz4(pl, 0, 1));
+    CHECK(next_reply() && rx_type == LK_ACK && rx_pl[0] == LK_RECT_LZ4 && rx_pl[1] == LK_EUNSUP);
+    CHECK(ack_u32(4) == 0 && ack_u32(6) == 0);
+    g_lz4_ok = 1;
+    send(LK_HELLO, 0, 0);
+    CHECK(next_reply() && (lk_rd16(rx_pl + 10) & LK_CAP_LZ4));
+}
+
 int main(void){
     sim_virtual = 1; sim_t_us = 1000000u;
     rxp.buf = rx_pl;
@@ -245,6 +317,7 @@ int main(void){
     test_host_sleep();
     test_idle_sleep_and_key_wake();
     test_unplug();
+    test_rect_lz4();
     printf("dispatch: %s\n", fails ? "FAILED" : "all OK");
     return fails ? 1 : 0;
 }

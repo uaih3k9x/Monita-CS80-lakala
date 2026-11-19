@@ -21,6 +21,8 @@
  *   大屏重画开机版权页 (Link 行 WAIT)、段码屏回本地时钟、蓝灯心跳, 不再发 KEY。下一条 HELLO 照旧把 Link 行改 OK, 主机推整帧。
  *   主机发 SLEEP (0x32, Mac 睡眠 / 关显示器时) 或没主机满 10 min: 关背光 (GPIO7)、段码屏 EN (GPIO10) 拉低、灭灯;
  *   任何一帧叫醒 (段码屏重新初始化), 按键也能叫醒 (显示开机页, 10 min 后再睡)。
+ * RECT_LZ4 (v11, link/lz4.h + dispatch.h): LZ4 raw block 先整块解进 g_lz (bss, 32 KiB), 校验过了再走 RECT 的路径写帧缓冲;
+ *   坏块计 bad_param 不动像素。caps bit8。
  *
  * 入口约定 (照原厂): enter 里只配看门狗 + 建任务就返回, 不得阻塞; 任务 prio 12, 7 参数, event_count = 1。
  */
@@ -34,7 +36,7 @@
 #include "linkwd.h"
 #include "imm.h"
 
-#define FW_VER       0x000Au          /* 10: 主机走了回开机画面 / SLEEP + 10 min 自动休眠 (link/linkwd.h), USB 拔掉即时检测; 9: 沉浸模式 (link/imm.h), 主机不经 HELLO 回来时恢复 KEY/灯 (link/linkwd.h), PWRKEY 慢采样不丢轻点; 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
+#define FW_VER       0x000Bu          /* 11: RECT_LZ4 (0x23, link/lz4.h, caps bit8); 10: 主机走了回开机画面 / SLEEP + 10 min 自动休眠 (link/linkwd.h), USB 拔掉即时检测; 9: 沉浸模式 (link/imm.h), 主机不经 HELLO 回来时恢复 KEY/灯 (link/linkwd.h), PWRKEY 慢采样不丢轻点; 8: 按键 KEY + 状态灯 LED; 7: 开机版权页 (lcd/bootscreen.h); 6: 三缓冲 (link/tribuf.h), DMA 研究代码已移除 (DIAG 26–30); 4: 跨缓冲 COPY, 默认立即翻页 */
 #define MAX_PAYLOAD  32768u          /* 800 x 20 行 RGB565 + 8 字节头 = 32008, 放得下一条整行带 */
 #define RX_CHUNK     16384u
 #define PORT         R05_PORT_USB_MODEM
@@ -43,13 +45,17 @@
 
 static uint8_t  g_pl[MAX_PAYLOAD] __attribute__((aligned(4)));
 static uint8_t  g_rx[RX_CHUNK] __attribute__((aligned(4)));
+/* RECT_LZ4 (v11) 暂存区: 整块解在这里 (前 8 字节补 RECT 头), 校验过了才走 lk_rect_apply 写帧缓冲, 坏块不动像素。
+ * 放 bss (RAM 窗口) 而不是 malloc: 不跟多缓冲 / 卷轴抢堆, 开机就有; raw_len ≤ MAX_PAYLOAD - 8 正好放得下 */
+static uint8_t  g_lz[MAX_PAYLOAD] __attribute__((aligned(4)));
+static const uint32_t g_lz4_ok = 1;
 static uint8_t  g_tx[64];
 static void    *g_sem;
 static void    *g_task;
 static lk_parser_t g_p;
 
 static struct {
-    uint32_t rx_bytes, rects, presents, bad_param;
+    uint32_t rx_bytes, rects, presents, bad_param, lz4;
 } st;
 
 static uint32_t now_us(void){ return (uint32_t)osiUpTimeUS(); }   /* 只用来做差, 71 分钟回绕无所谓 */

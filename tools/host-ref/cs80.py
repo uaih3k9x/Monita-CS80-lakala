@@ -5,7 +5,7 @@
   python cs80.py PORT ping                  打印统计
   python cs80.py PORT pattern               推一张测试图案 (整帧) 并回读 CRC 校验
   python cs80.py PORT png FILE              推一张 PNG (缩放到 800x1280)
-  python cs80.py PORT bench [N]             整帧吞吐: 连推 N 帧 (默认 10) 交替两张图
+  python cs80.py PORT bench [N] [PNG...]    整帧吞吐: 连推 N 帧 (默认 10) 交替两张图 (给了 PNG 就轮流推这些)
   python cs80.py PORT diffdemo [秒]         tile 差分: 一个小方块在屏上移动, 打印每帧 rect 数和耗时
   python cs80.py PORT seg TEXT              段码屏主区显示数字串, 例如 123456 / --:-- 不支持冒号
   python cs80.py PORT backlight 0|1
@@ -17,6 +17,7 @@
   python cs80.py PORT e1 [秒]               零拷贝实验 E1: 帧中途改扫描基址是否立即生效 (要人看/拍照)
   python cs80.py PORT zc line|ruler [tint]|split FRAMES T1 T2 TOP|arm 0|1|peek OFF|poke OFF VAL [HOLD_MS]
                                             DIAG 20..25 单条命令 (fw v3; 数字可写 0x..)
+  --no-lz4 (放在任意位置)                   不发 RECT_LZ4 (fw v11), 和默认的压缩推帧做 A/B 对比; 没装 python lz4 时本来就不发
 PORT: Windows 上是 "Quectel USB Modem" 对应的 COMx, macOS 上是 /dev/cu.usbmodem*。
 """
 import os
@@ -196,8 +197,9 @@ def e1(link, secs=6.0):
 def main():
     if len(sys.argv) < 3:
         print(__doc__); sys.exit(2)
-    link = ml.Link(sys.argv[1])
-    cmd, args = sys.argv[2], sys.argv[3:]
+    argv = [a for a in sys.argv if a != "--no-lz4"]
+    link = ml.Link(argv[1], lz4=len(argv) == len(sys.argv))
+    cmd, args = argv[2], argv[3:]
     info = link.hello()
     if cmd == "hello":
         print(info)
@@ -206,20 +208,23 @@ def main():
     elif cmd in ("pattern", "png"):
         fb = load_png(args[0]) if cmd == "png" else pattern(int(args[0]) if args else 0)
         dt, a = push_full(link, fb)
-        print("整帧 %.1f ms, %.2f MB/s, ACK %s" % (dt * 1000, len(fb) / dt / 1e6, a))
+        print("整帧 %.1f ms, %.2f MB/s, 线上 %d B (RECT_LZ4 %d/%d 条), ACK %s"
+              % (dt * 1000, len(fb) / dt / 1e6, link.last_push["bytes"], link.last_push["lz4"], link.last_push["rects"], a))
         verify(link, fb)
     elif cmd == "bench":
         n = int(args[0]) if args else 10
-        fbs = [pattern(0), pattern(1)]
-        times = []
+        fbs = [load_png(p) for p in args[1:]] or [pattern(0), pattern(1)]
+        times, wire, nlz = [], 0, 0
         for i in range(n):
-            dt, a = push_full(link, fbs[i & 1], i)
+            dt, a = push_full(link, fbs[i % len(fbs)], i)
             times.append(dt)
-        wire = sum(len(ml.encode(ml.RECT, 0, ml.rect_payload(fbs[0], *r))) for r in ml.full_rects()) + 10
-        print("整帧 x%d: 平均 %.1f ms  最快 %.1f ms  最慢 %.1f ms  线上 %d B/帧  %.2f MB/s"
-              % (n, sum(times) / n * 1000, min(times) * 1000, max(times) * 1000, wire, wire * n / sum(times) / 1e6))
+            wire += link.last_push["bytes"] + 10
+            nlz += link.last_push["lz4"]
+        print("整帧 x%d: 平均 %.1f ms  最快 %.1f ms  最慢 %.1f ms  线上平均 %d B/帧  %.2f MB/s  RECT_LZ4 %d 条 (%s)"
+              % (n, sum(times) / n * 1000, min(times) * 1000, max(times) * 1000, wire // n, wire / sum(times) / 1e6, nlz,
+                 "已启用" if link.use_lz4() else "未启用: --no-lz4 / 固件没有 caps bit8 / 没装 python lz4"))
         print("PRESENT clean 耗时 %d us, 统计 %s" % (a["extra"], link.ping()))
-        verify(link, fbs[(n - 1) & 1])
+        verify(link, fbs[(n - 1) % len(fbs)])
     elif cmd == "diffdemo":
         secs = float(args[0]) if args else 5
         bg = bytearray(pattern(0))

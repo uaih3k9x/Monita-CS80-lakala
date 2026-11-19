@@ -4,9 +4,10 @@
  * 碰硬件的部分 (扫描基址、cache、多缓冲收拢、卷轴分配、段码屏 ...) 由包含方按下面的名字提供。
  *
  * 包含方先定义 (app.c 里就是原来的那些):
- *   状态   g_p (lk_parser_t), g_pl (payload 缓冲), g_tx[64], st {rx_bytes, rects, presents, bad_param},
+ *   状态   g_p (lk_parser_t), g_pl (payload 缓冲), g_lz (RECT_LZ4 暂存区, ≥ MAX_PAYLOAD 字节, 4 字节对齐), g_tx[64],
+ *          st {rx_bytes, rects, presents, bad_param, lz4},
  *          g_tb (tb_t), g_imm, g_im (im_t), g_roll (卷轴首地址), g_boot_live, g_flip_now,
- *          g_lw (lw_t), g_key_n, g_key_at, g_keys, g_pwr, g_led, g_led_host, g_keys_ok, g_led_ok, g_lcd_ok,
+ *          g_lw (lw_t), g_key_n, g_key_at, g_keys, g_pwr, g_led, g_led_host, g_keys_ok, g_led_ok, g_lcd_ok, g_lz4_ok (fw v11; 0 = 装成旧固件, 模拟器用),
  *          fg_fb[72] (fg00/fgbuf.h), seg_host_at, seg_host_seen (fg00/segclock.h)
  *   常量   FW_VER, MAX_PAYLOAD, LCD_W, LCD_H, ROW_B, FB_ADDR, PORT, KEY_SAMPLE_MS
  *   函数   osiUpTimeUS, now_us, now_ms, reply, diag_reply, on_diag, dcache_clean, ql_uart_write, keys_hw_raw,
@@ -29,6 +30,7 @@
 #include "keys.h"
 #include "led.h"
 #include "linkwd.h"
+#include "lz4.h"
 
 /* ACK: u8 for_type u8 status u16 0 | u32 rx_bytes frames crc_err len_err rects presents bad_param uptime | u32 extra */
 static void ack(uint8_t status, uint32_t extra){
@@ -43,7 +45,8 @@ static void ack(uint8_t status, uint32_t extra){
 /* HELLO_ACK 的 caps; 运行中会变 (沉浸模式里没有多缓冲, IMM_EXIT / DIAG 32 之后块数可能不同) */
 static uint32_t caps(void){
     return LK_CAP_FBCRC | LK_CAP_COPY | (g_tb.n > 1 ? LK_CAP_DOUBLEBUF : 0u) | (g_tb.n > 2 ? LK_CAP_TRIBUF : 0u)
-         | (g_keys_ok ? LK_CAP_KEYS : 0u) | (g_led_ok ? LK_CAP_LED : 0u) | (g_lcd_ok ? LK_CAP_IMMERSIVE : 0u) | LK_CAP_SLEEP;
+         | (g_keys_ok ? LK_CAP_KEYS : 0u) | (g_led_ok ? LK_CAP_LED : 0u) | (g_lcd_ok ? LK_CAP_IMMERSIVE : 0u) | LK_CAP_SLEEP
+         | (g_lz4_ok ? LK_CAP_LZ4 : 0u);
 }
 
 static void led_default(void){ led_blink(&g_led, LED_B, 3000u, 2000u, now_ms()); }   /* 未连接: 蓝灯 2 s 亮 1 s 灭 */
@@ -114,9 +117,10 @@ static void on_frame(void){
     int ev = lw_rx(&g_lw, now_ms());                   /* 有效帧才算主机还在 (fw v10) */
     if (ev & LW_WOKE) dev_wake();
     if (ev & LW_RESUMED){ g_led = g_led_host; led_poll(); }   /* 主机回来了 (没重发 HELLO): 恢复它设的灯 */
-    if (g_p.type == LK_RECT || g_p.type == LK_COPY || g_p.type == LK_DIAG) g_boot_live = 0;   /* 主机开始画了 / 诊断可能动缓冲 */
+    int lz = g_p.type == LK_RECT_LZ4 && g_lz4_ok;     /* 没有 LZ4 时 0x23 走 default (同 v10: 不认识的 type) */
+    if (g_p.type == LK_RECT || g_p.type == LK_COPY || g_p.type == LK_DIAG || lz) g_boot_live = 0;   /* 主机开始画了 / 诊断可能动缓冲 */
     if (g_imm){                                        /* 沉浸模式: 普通画面的写操作和会动缓冲的诊断一律拒 */
-        if (g_p.type == LK_RECT || g_p.type == LK_COPY){ st.bad_param++; return; }
+        if (g_p.type == LK_RECT || g_p.type == LK_COPY || lz){ st.bad_param++; return; }
         if (g_p.type == LK_PRESENT){ ack(LK_EPARAM, 0); return; }
         if (g_p.type == LK_DIAG){ diag_reply(n ? pl[0] : 0, LK_EUNSUP, 0, 0); return; }
     }
@@ -142,6 +146,13 @@ static void on_frame(void){
         if (lk_rect_apply((uint16_t *)draw_target(), LCD_W, LCD_H, pl, n, &g_tb.y0, &g_tb.y1) == LK_OK) st.rects++;
         else st.bad_param++;
         return;                                        /* RECT 不应答, 保持流式 */
+    case LK_RECT_LZ4:                                  /* fw v11: 先整块解进 g_lz 再走 RECT 的路径; 坏块不动像素 */
+        if (!lz) break;
+        draw_begin();
+        if (lk_rect_lz4_apply((uint16_t *)draw_target(), LCD_W, LCD_H, pl, n, g_lz, MAX_PAYLOAD, &g_tb.y0, &g_tb.y1) == LK_OK){
+            st.rects++; st.lz4++;
+        } else st.bad_param++;
+        return;                                        /* 同 RECT: 不应答 */
     case LK_COPY:
         if (do_copy(pl, n) == LK_OK) st.rects++;
         else st.bad_param++;
@@ -154,7 +165,7 @@ static void on_frame(void){
         return;
     }
     case LK_HELLO: {
-        st.rx_bytes = 0; st.rects = 0; st.presents = 0; st.bad_param = 0;
+        st.rx_bytes = 0; st.rects = 0; st.presents = 0; st.bad_param = 0; st.lz4 = 0;
         g_p.frames = 1; g_p.crc_err = 0; g_p.len_err = 0;      /* 计数从这条 HELLO 重新算 */
         if (n >= 6) clk_set((uint32_t)lk_rd16(pl) | ((uint32_t)lk_rd16(pl + 2) << 16), (int16_t)lk_rd16(pl + 4));
         boot_link_ok();                                /* 开机画面还在: Link 行 WAIT -> OK */
@@ -224,9 +235,9 @@ static void on_frame(void){
         ack(LK_OK, 0);
         return;
     default:
-        ack(LK_EUNSUP, 0);
-        return;
+        break;
     }
+    ack(LK_EUNSUP, 0);                                 /* 不认识的 type (含没有 LZ4 时的 0x23) */
 }
 
 /* 主循环: 收到一段字节 */

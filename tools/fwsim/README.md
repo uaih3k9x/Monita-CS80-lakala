@@ -2,7 +2,14 @@
 
 `sh tools/fwsim/run.sh`：编模拟器 `fwsim`，Python 参考实现（`tools/host-ref`）和 Mac 渲染器（`mac/`，debug 构建，
 `monita-cs80 --conformance`）对着它各跑一遍同一套脚本（`conformance.py` / `mac/Sources/monita-cs80/Conformance.swift`），
-结果和 `expected()`（照 `docs/protocol.md` 写的）逐项比，两个上位机之间也要一样。`--python-only` 只测 Python。
+结果和 `expected()`（照 `docs/protocol.md` 写的）逐项比，两个上位机之间也要一样。Linux 上位机（`linux/` 的 `Session`）跑其中
+HELLO + RECT_LZ4 那一段（`linux_session`），和另外两个逐项一样。`--python-only` 不测 Swift。
+
+RECT_LZ4 段（fw v11，`lz4_section` / `Conformance.swift lz4Session`）：先 HELLO 清计数，再推 UI 整帧（每条都压）、上半噪声下半 UI 的混合帧
+（正好一半条带压缩：噪声谁也压不动，UI 谁都压得很小，所以 liblz4 和 Apple 的编码器判定一样）、塞一条 offset 0 的坏块（计 `bad_param`、屏上 CRC 不变）、
+坏块 + 带 RECT_LZ4 的整帧（这批推坏了）、推整帧恢复（上位机到下次 HELLO 前只发 RECT：`lz4_rects` 不涨）、再 HELLO 又发 RECT_LZ4。
+每步看模拟器的 `lz4_rects`（成功的 RECT_LZ4 条数）和 `bad_param`。第五种配置 `--no-lz4` 装成 v10 固件：caps 没 bit8，上位机一条都不发，
+坏块被当成不认识的 type（回 EUNSUP、不计错）。
 
 ## 模拟器里是什么
 
@@ -20,6 +27,7 @@
 |---|---|
 | `screen_crc` `nbuf` `imm` `roll_rows` `collapse` `uncollapse` `flip_now` | 屏上那一帧的 CRC、多缓冲块数、沉浸模式、卷轴行数、旧 DIAG 收拢次数 |
 | `rx_bytes` `frames` `crc_err` `len_err` `rects` `presents` `bad_param` | 同 ACK 里的计数 |
+| `lz4_rects` | HELLO 以来成功的 RECT_LZ4 条数（fw v11；ACK 里没有，只给对拍看） |
 | `link_up` `key_n` `boot_live` | 主机在不在（linkwd）、下一条 KEY 的序号、开机页还在（Link 行 WAIT） |
 | `boot_screen` `boot_draws` `asleep` `seg_en` `seg_off` | 屏上那一帧和开机时画的版权页一样、版权页画了几次、睡着没（SLEEP / 10 min 没主机）、段码屏 EN、本地时钟停刷段码屏（fw v10） |
 | `backlight` `bl_writes` `seg_writes` | 背光当前值 / 写了几次、段码屏刷了几次 |
@@ -34,8 +42,8 @@
 协议回包之外，脚本走到下面这些点时 harness 取一次 `stat`（Swift 打印 `@stat 名字`，等 harness 回一行再继续），
 归一成和时间无关的值放进结果的 `sim`，也参加 python == swift 比较。
 HELLO 的时间由 harness 注入固定值（`CONFIGS` 的 `now` + `zone`；Python 用 `Link.clock` + `TZ`，Swift 用 `MONITA_FAKE_NOW` + `TZ`），
-期望的当地时间用 `zoneinfo` 独立算。四种配置的时区：America/New_York 夏令时（-240，跨到前一天）、Asia/Kolkata（+330，跨到第二天）、
-Europe/London 夏令时（+60）、Australia/Adelaide 南半球夏令时（+630）。
+期望的当地时间用 `zoneinfo` 独立算。五种配置的时区：America/New_York 夏令时（-240，跨到前一天）、Asia/Kolkata（+330，跨到第二天）、
+Europe/London 夏令时（+60）、Australia/Adelaide 南半球夏令时（+630）、Asia/Tokyo（+540，旧固件配置）。
 
 | 点 | 检查 |
 |---|---|
@@ -50,6 +58,7 @@ Europe/London 夏令时（+60）、Australia/Adelaide 南半球夏令时（+630�
 | `lost`（`rehello` 之后上位机不发了，等到 `link_up` = 0） | 4.6–6.2 s 之后算走了；屏上 = 开机版权页（CRC 对）、Link 行 WAIT、段码屏本地时钟、蓝灯心跳、背光重新开（脚本前面关过） |
 | `sleep`（带载荷的 SLEEP 被拒 + 空 SLEEP） | 睡着、背光 / 段码屏 EN / 灯全关、1.2 s 里段码屏一次都没刷 |
 | `wake`（上位机重新 HELLO：Python `hello()`，Swift 走渲染器真用的 `resume()` + `connectIfNeeded()`） | 全开、Link 行 OK、灯交还主机、设备时钟重新对上注入时刻 |
+| `lz4_hello` `lz4_full` `lz4_mixed` `lz4_bad` `lz4_fail` `lz4_recover` `lz4_hello2` `lz4_again`（RECT_LZ4 段，见上） | `[lz4_rects, bad_param]`：整帧 n 条（32 KiB 时 64、16 KiB 时 128）→ 混合帧 +n/2 → 坏块 bad +1 → 失败那批 +n、bad +1 → 恢复那批不涨 → HELLO 清零 → 又 n 条；旧固件全是 0。两次 `lz4_hello*` 也重设时钟基准（段里的 HELLO 带固定时刻） |
 | `end`（会话结束，等到 SEG 后 6.2 s） | 时钟按秒走（和墙钟差 ≤ 1.5 s，从 `wake` 那次 HELLO 起算）；SEG 接管过期后回到本地时钟画面 |
 
 ## 变异测试（2026-11-18）

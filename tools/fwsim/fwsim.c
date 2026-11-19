@@ -2,7 +2,8 @@
  * fwsim: Monita-CS80 固件的主机模拟器, 不用设备就能测上位机。协议层是真固件代码 (fw/link/dispatch.h 等, 见 simdev.h)。
  *
  *   cc -std=c99 -O2 -I fw/link -o build/fwsim tools/fwsim/fwsim.c      (tools/fwsim/run.sh 会编)
- *   ./fwsim [--nbuf 1..3] [--imm-rows N] [--max-payload N] [--no-keys] [--no-led] [--no-lcd]
+ *   ./fwsim [--nbuf 1..3] [--imm-rows N] [--max-payload N] [--no-keys] [--no-led] [--no-lcd] [--no-lz4]
+ *   --no-lz4: 装成没有 RECT_LZ4 的旧固件 (caps 不带 bit8, 0x23 回 EUNSUP), 测上位机降级
  *
  * 开一个伪终端当"USB 串口", 第一行在 stdout 打印 "PTY /dev/ttysNNN"; 上位机把它当串口打开即可
  * (Python: monita_link.Link("/dev/ttysNNN"), Mac: monita-cs80 --device /dev/ttysNNN)。
@@ -56,11 +57,11 @@ static void cmd(char *line){
         printf("{\"screen_crc\":%u,\"nbuf\":%u,\"imm\":%d,\"roll_rows\":%u,\"led\":%u,\"backlight\":%u,\"bl_writes\":%u,"
                "\"seg_writes\":%u,\"collapse\":%u,\"uncollapse\":%u,"
                "\"link_up\":%u,\"rx_bytes\":%u,\"frames\":%u,\"crc_err\":%u,\"len_err\":%u,\"rects\":%u,\"presents\":%u,"
-               "\"bad_param\":%u,\"flip_now\":%u,\"key_n\":%u,\"boot_live\":%d,",
+               "\"bad_param\":%u,\"lz4_rects\":%u,\"flip_now\":%u,\"key_n\":%u,\"boot_live\":%d,",
                sim_screen_crc(), g_tb.n, g_imm, g_roll_rows, sim.led_mask, sim.backlight, sim.bl_writes,
                sim.seg_writes, sim.collapse, sim.uncollapse,
                g_lw.up, st.rx_bytes, g_p.frames, g_p.crc_err, g_p.len_err, st.rects, st.presents,
-               st.bad_param, g_flip_now, g_key_n, g_boot_live);
+               st.bad_param, st.lz4, g_flip_now, g_key_n, g_boot_live);
         /* 主机走了 / 休眠 (fw v10): 屏上是不是开机版权页 (CRC 和开机时画的一样)、重画了几次、睡着没、段码屏 EN */
         printf("\"boot_screen\":%d,\"boot_draws\":%u,\"asleep\":%u,\"seg_en\":%u,\"seg_off\":%d,",
                sim_screen_crc() == sim_boot_crc, sim.boot_draws, g_lw.asleep, sim.seg_en, seg_off);
@@ -102,7 +103,7 @@ static int open_pty(char *name, size_t cap, int *slave_keep){
 }
 
 static void usage(void){
-    fprintf(stderr, "usage: fwsim [--nbuf 1..3] [--imm-rows N] [--max-payload N] [--no-keys] [--no-led] [--no-lcd]\n");
+    fprintf(stderr, "usage: fwsim [--nbuf 1..3] [--imm-rows N] [--max-payload N] [--no-keys] [--no-led] [--no-lcd] [--no-lz4]\n");
     exit(2);
 }
 
@@ -115,6 +116,7 @@ int main(int argc, char **argv){
         else if (!strcmp(a, "--no-keys")) g_keys_ok = 0;
         else if (!strcmp(a, "--no-led")) g_led_ok = 0;
         else if (!strcmp(a, "--no-lcd")) g_lcd_ok = 0;
+        else if (!strcmp(a, "--no-lz4")) g_lz4_ok = 0;
         else usage();
     }
     if (sim_max_payload < 16 || sim_max_payload > SIM_PL_CAP) usage();

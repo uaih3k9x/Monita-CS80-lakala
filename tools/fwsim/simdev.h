@@ -29,7 +29,7 @@
 #include "../../fw/fg00/segmap.h"
 #include "../../fw/lcd/bootscreen.h"
 
-#define FW_VER        0x000Au          /* 跟 fw/app.c 的 FW_VER (tools/fwsim/run.sh 会对一遍) */
+#define FW_VER        0x000Bu          /* 跟 fw/app.c 的 FW_VER (tools/fwsim/run.sh 会对一遍) */
 #define LCD_W         800u
 #define LCD_H         1280u
 #define FB_SIZE       (LCD_W * LCD_H * 2u)
@@ -43,7 +43,7 @@
 static uint32_t sim_max_payload = 32768u;   /* HELLO_ACK.max_payload 和拆帧上限 */
 static uint32_t sim_nbuf_want   = 3u;       /* 开机拿到几块 fb (1..3) */
 static uint32_t sim_roll_rows   = 2720u;    /* IMM_ENTER 时卷轴行数; < 1280 + 256 = 拿不到 (回 EUNSUP) */
-static uint32_t g_keys_ok = 1, g_led_ok = 1, g_lcd_ok = 1;
+static uint32_t g_keys_ok = 1, g_led_ok = 1, g_lcd_ok = 1, g_lz4_ok = 1;   /* g_lz4_ok = 0: 装成没有 RECT_LZ4 的旧固件 */
 #define MAX_PAYLOAD sim_max_payload
 
 /* ---- 时间: 默认真实单调时钟; 单测用 sim_virtual + sim_t_us ---- */
@@ -70,9 +70,10 @@ static void ql_uart_write(uint32_t port, const uint8_t *p, uint32_t n){ (void)po
 
 /* ---- dispatch.h 要的状态 ---- */
 static uint8_t  g_pl[SIM_PL_CAP] __attribute__((aligned(4)));
+static uint8_t  g_lz[SIM_PL_CAP] __attribute__((aligned(4)));   /* RECT_LZ4 暂存区 (同 app.c) */
 static uint8_t  g_tx[64];
 static lk_parser_t g_p;
-static struct { uint32_t rx_bytes, rects, presents, bad_param; } st;
+static struct { uint32_t rx_bytes, rects, presents, bad_param, lz4; } st;
 static tb_t     g_tb;
 static uint32_t g_nbuf = 1;
 static uint32_t g_flip_now = 1;

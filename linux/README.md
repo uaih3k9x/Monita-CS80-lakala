@@ -20,11 +20,11 @@
 ```sh
 # 1. 依赖
 # Debian / Ubuntu
-sudo apt install python3 python3-pil python3-jeepney python3-usb fonts-liberation fonts-noto-cjk
+sudo apt install python3 python3-pil python3-jeepney python3-usb python3-lz4 fonts-liberation fonts-noto-cjk
 # Fedora
-sudo dnf install python3 python3-pillow python3-jeepney python3-pyusb liberation-fonts google-noto-sans-cjk-fonts
+sudo dnf install python3 python3-pillow python3-jeepney python3-pyusb python3-lz4 liberation-fonts google-noto-sans-cjk-fonts
 # Arch
-sudo pacman -S python python-pillow python-jeepney python-pyusb ttf-liberation noto-fonts-cjk
+sudo pacman -S python python-pillow python-jeepney python-pyusb python-lz4 ttf-liberation noto-fonts-cjk
 
 # 2. 代码（放这里，systemd 单元的 ExecStart 就不用改）
 git clone <本仓库> ~/.local/share/monita-cs80
@@ -46,6 +46,7 @@ linux/monita-cs80-linux --device usb -v
 | jeepney ≥ 0.7 | D-Bus：MPRIS、logind | 没有就只显示时钟 / "未在播放"，不处理休眠；0.6（Debian 11）只有 MPRIS，不能传 fd，不处理休眠 |
 | pyusb（1.0 / 1.1+ 都行）+ libusb-1.0 | `--device usb` | 走串口 `/dev/ttyUSB*` 时不需要 |
 | pyserial | 串口 | 可选，没有就用 monita_link 自带的 termios 实现 |
+| python3-lz4 | 整帧压缩（fw v11 的 RECT_LZ4，整帧 ≈ 350 ms → 估计 ≈ 50 ms） | 可选，没有就照发不压缩的 RECT；`--no-lz4` 关掉 |
 | wpctl 或 pactl | 音量键 | 桌面一般自带（`wireplumber` / `pulseaudio-utils`，Fedora `pulseaudio-utils`，Arch `wireplumber` / `libpulse`）；wpctl 跑不通时自动改用 pactl；都没有时音量键只打日志 |
 | fontconfig（`fc-match`） | 找字体 | 桌面都有；没有时按常见路径找 |
 
@@ -172,7 +173,7 @@ license, may break at any time; lyrics/covers belong to their owners and are nev
 lyrics / clock pages as the Mac host with Pillow, and talks the repo's protocol (`docs/protocol.md`) over pyusb
 (interface 7, bulk OUT 0x07 / IN 0x8A) or a tty. Front-panel keys map to volume (wpctl / pactl), page toggle and
 MPRIS PlayPause; the LED, segment display and logind sleep/wake (SLEEP before suspend, re-HELLO + full frame on resume)
-are handled too. It needs no X11/Wayland. Dependencies: Python ≥ 3.9, Pillow; optional jeepney, pyusb, pyserial.
+are handled too. It needs no X11/Wayland. Dependencies: Python ≥ 3.9, Pillow; optional jeepney, pyusb, pyserial, python3-lz4 (fw v11 LZ4-compressed full frames).
 Run `linux/monita-cs80-linux --device usb`; see `packaging/` for a systemd --user unit and udev rules, and run
 `python3 -m unittest discover -s linux/tests` for the tests (including a firmware-simulator run, `tools/fwsim`).
 Linux-only pieces are behind small interfaces and tested with fakes; real-hardware Linux testing is still welcome.

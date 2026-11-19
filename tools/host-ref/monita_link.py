@@ -1,6 +1,7 @@
-"""Monita link 协议 v0 的 Python 参考实现 (docs/protocol.md), 覆盖到 fw v10 (KEY / LED / 沉浸模式 IMM_* / SLEEP)。
+"""Monita link 协议 v0 的 Python 参考实现 (docs/protocol.md), 覆盖到 fw v11 (KEY / LED / 沉浸模式 IMM_* / SLEEP / RECT_LZ4)。
 
 只用标准库; 打开串口优先用 pyserial (`pip install pyserial`), 没装时 POSIX 上退回 PosixPort (termios)。
+RECT_LZ4 (fw v11) 要 python lz4 (`pip install lz4` / Debian `python3-lz4`, 可选): 没装就照发 RECT。
 纯逻辑 (编帧、拆帧、RGB565、tile 差分打包、IMM 载荷) 不依赖串口, 见 test_monita_link.py。
 不用设备测上位机: tools/fwsim/ (固件模拟器, 开一个伪终端当串口)。
 """
@@ -9,10 +10,16 @@ import time
 import warnings
 import zlib
 
+try:
+    import lz4.block as _lz4block               # 可选: fw v11 的 RECT_LZ4
+except ImportError:
+    _lz4block = None
+
 SYNC = b"\xA5\x5A"
 PROTO_VER = 0
 HELLO, SEG, RECT, PRESENT, BACKLIGHT, FBCRC, DIAG, PING = 0x01, 0x10, 0x20, 0x21, 0x30, 0x40, 0x50, 0x7F
 COPY = 0x22
+RECT_LZ4 = 0x23                                 # fw v11: u16 x,y,w,h + u32 raw_len + LZ4 raw block, 同 RECT 不应答
 LED = 0x31                                      # fw v8
 SLEEP = 0x32                                    # fw v10: 空 -> ACK, 设备关背光 / 段码屏 / 灯, 下一帧叫醒
 IMM_ENTER, IMM_EXIT, IMM_RECT, IMM_SCROLL = 0x60, 0x61, 0x62, 0x63   # fw v9
@@ -23,6 +30,7 @@ TILE_W, TILE_H = 32, 16
 CAP_FBCRC, CAP_DOUBLEBUF, CAP_COPY, CAP_TRIBUF = 0x0001, 0x0002, 0x0004, 0x0008
 CAP_KEYS, CAP_LED, CAP_IMMERSIVE = 0x0010, 0x0020, 0x0040
 CAP_SLEEP = 0x0080                              # fw v10: SLEEP + 主机走了 (5 s 没帧) 回开机画面
+CAP_LZ4 = 0x0100                                # fw v11: RECT_LZ4
 KEY_DOWN, KEY_UP, KEY_LONG = 1, 2, 3
 LED_R, LED_G, LED_B = 1, 2, 4
 LED_OFF, LED_ON, LED_BLINK = 0, 1, 2
@@ -131,6 +139,29 @@ def rect_payload(fb, x, y, w, h, width=W):
     return struct.pack("<HHHH", x, y, w, h) + b"".join(rows)
 
 
+# ---- RECT_LZ4 (0x23, fw v11) ----
+
+def lz4_available():
+    return _lz4block is not None
+
+
+def lz4_worth(clen, raw_len):
+    """压缩后严格小于原始的 3/4 才值得发 RECT_LZ4 (三个上位机同一条规则)"""
+    return clen is not None and clen * 4 < raw_len * 3
+
+
+def rect_frame(fb, x, y, w, h, lz4=False, width=W):
+    """一个矩形编成 (type, payload)。lz4 = True 且压得够小时是 RECT_LZ4 (矩形头 + u32 raw_len + LZ4 raw block,
+    不带 frame 头), 否则 RECT。payload 不会比同一块的 RECT 长 (调用方按 RECT 切的矩形照样放得进 max_payload)"""
+    pl = rect_payload(fb, x, y, w, h, width)
+    if lz4 and _lz4block is not None:
+        raw = pl[8:]
+        c = _lz4block.compress(raw, store_size=False)
+        if lz4_worth(len(c), len(raw)) and 12 + len(c) <= len(pl):
+            return RECT_LZ4, pl[:8] + struct.pack("<I", len(raw)) + c
+    return RECT, pl
+
+
 def dirty_rects(prev, cur, width=W, height=H, max_payload=32768):
     """32×16 tile 差分, 同一 tile 行里相邻的脏 tile 合并成一个矩形 (受 max_payload 限制)。
     prev 为 None 时返回整帧条带。返回 [(x, y, w, h)]。"""
@@ -218,9 +249,13 @@ def hello_payload(t):
 class Link:
     """port: 串口名 (COMx / /dev/tty*), 或者已经打开的对象 (要有 read / write / in_waiting / reset_input_buffer / close)"""
 
-    def __init__(self, port, timeout=2.0):
+    def __init__(self, port, timeout=2.0, lz4=True):
         self.ser = open_port(port) if isinstance(port, str) else port
         self.timeout = timeout
+        self.lz4 = lz4                  # False: 不发 RECT_LZ4 (A/B 对比); 固件 caps 有 bit8 且装了 python lz4 才真发
+        self.lz4_off = False            # 一批带 RECT_LZ4 的推坏了: 到下一次 HELLO 前只发 RECT
+        self.last_errs = 0              # 最近一条 ACK 的 crc_err + len_err + bad_param
+        self.last_push = None           # 上一次 push: dict(bytes, rects, lz4)
         self.seq = 0
         self.parser = Parser()
         self.info = None
@@ -268,11 +303,14 @@ class Link:
 
     def call(self, ftype, payload=b"", timeout=None):
         """发一条需要应答的命令, 返回 ACK dict"""
-        return parse_ack(self.wait(ACK, self.send(ftype, payload), timeout))
+        a = parse_ack(self.wait(ACK, self.send(ftype, payload), timeout))
+        self.last_errs = a["crc_err"] + a["len_err"] + a["bad_param"]
+        return a
 
     def hello(self, with_time=True):
         pl = hello_payload(self.clock()) if with_time else b""
         self.info = parse_hello_ack(self.wait(HELLO_ACK, self.send(HELLO, pl)))
+        self.lz4_off, self.last_errs = False, 0          # HELLO 清了设备的计数
         if self.info["proto"] != PROTO_VER:
             warnings.warn("设备 proto_ver = %d, 这份参考实现只认 %d" % (self.info["proto"], PROTO_VER))
         return self.info
@@ -333,18 +371,33 @@ class Link:
         """窗口滚到顶 = y; 返回 ACK (extra = 正在扫描的窗口顶)"""
         return self.call(IMM_SCROLL, imm_scroll_payload(y, dur_ms))
 
+    def use_lz4(self):
+        """这一批能不能发 RECT_LZ4: 调用方没关、固件有 caps bit8、装了 python lz4、没因为推坏而暂停"""
+        return (self.lz4 and not self.lz4_off and lz4_available()
+                and bool(self.info and self.info["caps"] & CAP_LZ4))
+
     def push(self, fb, rects, frame_id=0, copies=()):
         """把 fb (整帧 RGB565 字节) 里这些矩形发出去, 再 PRESENT; 返回 PRESENT 的 ACK。
-        RECT/COPY 不应答, 一次写进串口, 只等 PRESENT 的 ACK。copies = [(sx,sy,w,h,dx,dy)] 排在 RECT 前面。"""
+        RECT/COPY 不应答, 一次写进串口, 只等 PRESENT 的 ACK。copies = [(sx,sy,w,h,dx,dy)] 排在 RECT 前面。
+        fw v11: 每个矩形压缩后 < 3/4 就发 RECT_LZ4 (rect_frame)。这一批有 RECT_LZ4 而 ACK 的出错计数涨了,
+        到下一次 HELLO 前只发 RECT (编解码真不一致时, 调用方的"推整帧恢复"不会一直失败)。"""
         out = bytearray()
+        lz, n_lz = self.use_lz4(), 0
+        before = self.last_errs
         for c in copies:
             self.seq = (self.seq + 1) & 0xFF
             out += encode(COPY, self.seq, copy_payload(*c))
         for (x, y, w, h) in rects:
             self.seq = (self.seq + 1) & 0xFF
-            out += encode(RECT, self.seq, rect_payload(fb, x, y, w, h))
+            t, pl = rect_frame(fb, x, y, w, h, lz)
+            n_lz += t == RECT_LZ4
+            out += encode(t, self.seq, pl)
         self.ser.write(out)
-        return self.call(PRESENT, struct.pack("<H", frame_id & 0xFFFF), timeout=30)
+        self.last_push = dict(bytes=len(out), rects=len(rects), lz4=n_lz)
+        a = self.call(PRESENT, struct.pack("<H", frame_id & 0xFFFF), timeout=30)
+        if n_lz and (a["status"] != OK or self.last_errs != before):
+            self.lz4_off = True
+        return a
 
 
 # ---- COPY (0x22, fw v2) ----

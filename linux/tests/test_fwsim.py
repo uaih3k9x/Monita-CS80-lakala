@@ -30,8 +30,11 @@ SIM = os.path.join(REPO, "tools", "fwsim", "build", "fwsim")
 
 
 def build_sim():
-    """和 run.sh 同样的编译命令；源文件比产物新就重编"""
+    """和 run.sh 同样的编译命令；源文件（含 fw/link/*.h 等固件头文件）比产物新就重编"""
+    import glob
     srcs = [os.path.join(REPO, "tools", "fwsim", f) for f in ("fwsim.c", "simdev.h")]
+    srcs += sorted(glob.glob(os.path.join(REPO, "fw", "link", "*.h")) + glob.glob(os.path.join(REPO, "fw", "fg00", "*.h"))
+                   + glob.glob(os.path.join(REPO, "fw", "lcd", "*.h")))
     if os.path.exists(SIM) and all(os.path.getmtime(SIM) >= os.path.getmtime(s) for s in srcs):
         return
     os.makedirs(os.path.dirname(SIM), exist_ok=True)

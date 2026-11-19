@@ -81,6 +81,12 @@ final class DeviceLink {
     func setStaleAfter(_ s: Double?) { lock.lock(); ka = LinkKeepalive(staleAfterS: s); lock.unlock() }
     /// HELLO 带的时间从这里取（--conformance 换成固定值，见 Conformance.swift）
     var clock: () -> Date = { Date() }
+    /// fw v11 RECT_LZ4：false = 不发（--no-lz4）；固件 caps 有 bit8 才真发
+    var lz4 = true
+    /// 一批带 RECT_LZ4 的推坏了：到下一次 HELLO 前只发 RECT（编解码真不一致时"推整帧恢复"不会一直失败）
+    private var lz4Off = false
+    /// 上一次 push 用了几条 RECT_LZ4（bench / 对拍看）
+    private(set) var lastPushLz4 = 0
 
     init(name: String, open: @escaping () -> LinkPort?) { self.name = name; self.open = open }
 
@@ -137,7 +143,7 @@ final class DeviceLink {
             drop("HELLO 没有应答"); return false
         }
         guard h.protoSupported, h.width == screenW, h.height == screenH, h.pixfmt == 1 else { drop("协议版本 / 屏参数不符 \(h)"); return false }
-        info = h; errBase = 0; gen += 1
+        info = h; errBase = 0; gen += 1; lz4Off = false
         return true
     }
 
@@ -163,7 +169,7 @@ final class DeviceLink {
         guard let p = open() else { return false }
         port = p; parser = FrameParser()
         guard hello(), let h = info else { return false }
-        log("设备已连上 \(name)：fw=\(h.fw) caps=\(h.caps)\(h.doubleBuffered ? "（双缓冲）" : "") max_payload=\(h.maxPayload)")
+        log("设备已连上 \(name)：fw=\(h.fw) caps=\(h.caps)\(h.doubleBuffered ? "（双缓冲）" : "")\(h.hasLZ4 && lz4 ? "（LZ4）" : "") max_payload=\(h.maxPayload)")
         return true
     }
 
@@ -175,6 +181,9 @@ final class DeviceLink {
         ka.suspend()                                   // 没应答也停发：多半已经断了，醒来再说
         return ok
     }
+
+    /// 马上重新 HELLO（带时间；对拍脚本用：清设备计数、恢复 RECT_LZ4）。失败就断开
+    func rehello() -> Bool { lock.lock(); defer { lock.unlock() }; return port != nil && hello() }
 
     /// Mac 醒来：可以发了，下一条之前先重新 HELLO（connectIfNeeded 会返回 true）
     func resume() { lock.lock(); if ka.suspended { ka.resume() }; lock.unlock() }
@@ -249,10 +258,17 @@ final class DeviceLink {
             for y in stride(from: r.y, to: r.y + r.h, by: rows) { rs.append(LinkRect(x: r.x, y: y, w: r.w, h: min(rows, r.y + r.h - y))) }
         }
         rs += rects.filter { 8 + $0.w * $0.h * 2 <= maxP }
-        let (bytes, s) = encodeBatch(rs, buf, copies: info.hasCopy ? copies : [], frameID: frameID, seq: &seq)
+        let useLz4 = lz4 && !lz4Off && info.hasLZ4 && lz4Available
+        let (bytes, s, nLz4) = encodeBatchLz4(rs, buf, copies: info.hasCopy ? copies : [], frameID: frameID, lz4: useLz4, seq: &seq)
+        lastPushLz4 = nLz4
         guard write(port, bytes) else { drop("写失败"); return false }
         guard let r = wait(type: LinkType.ack, seq: s, timeoutMs: 10_000), let a = AckStats(r) else { drop("PRESENT 没有应答"); return false }
         defer { errBase = a.crcErr + a.lenErr + a.badParam }
-        return presentAckOK(a, errBase: errBase)       // 沉浸模式里 PRESENT 回 status 1
+        let ok = presentAckOK(a, errBase: errBase)     // 沉浸模式里 PRESENT 回 status 1
+        if !ok && nLz4 > 0 {
+            lz4Off = true
+            log("这批有 \(nLz4) 条 RECT_LZ4 推坏了：到下次 HELLO 前只发普通 RECT")
+        }
+        return ok
     }
 }

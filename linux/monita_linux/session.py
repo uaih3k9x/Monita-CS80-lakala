@@ -2,7 +2,8 @@
 
 - keepalive：隔了 ≥ stale_after 秒才发下一条时先重新 HELLO（固件 ~5.1 s 没有效帧就回开机页），generation + 1；
 - HELLO_ACK 收紧：proto / 800×1280 / pixfmt 1 不符都算连接失败；
-- caps 门控：LED（bit5）、COPY（bit2）、SLEEP（bit7）；
+- caps 门控：LED（bit5）、COPY（bit2）、SLEEP（bit7）、RECT_LZ4（bit8，fw v11；还要装了 python3-lz4）；
+- RECT_LZ4：每个矩形压缩后 < 3/4 才发（monita_link.rect_frame）；一批里有 RECT_LZ4 却推坏了，到下一次 HELLO 前只发 RECT；
 - 只有等应答超时、IO 出错、HELLO_ACK 不合格算断开；断开就关端口，下一轮重新 open_port（USB 重新枚举后旧句柄失效）；
 - suspend() 发 SLEEP 后一个字节都不写（任何一帧都会叫醒设备）；resume() 之后第一条之前必定 HELLO。
 单线程用，不加锁。
@@ -18,7 +19,7 @@ RETRY_S = 2.0
 
 
 class Session:
-    def __init__(self, open_port, clock=time.time, mono=time.monotonic, stale_after=3.5, link_factory=ml.Link):
+    def __init__(self, open_port, clock=time.time, mono=time.monotonic, stale_after=3.5, link_factory=ml.Link, lz4=True):
         self.open_port, self.clock, self.mono = open_port, clock, mono
         self.stale_after, self.link_factory = stale_after, link_factory
         self.link = None
@@ -32,6 +33,8 @@ class Session:
         self.base = 0                   # PRESENT ACK 的出错计数基线（crc_err + len_err + bad_param）
         self.key_n = 0
         self.open_err = None            # 上一次打不开设备的错（日志去重）
+        self.lz4 = lz4                  # False：不发 RECT_LZ4（--no-lz4）
+        self.lz4_off = False            # 一批带 RECT_LZ4 的推坏了：到下一次 HELLO 前只发 RECT
 
     # ---- 状态 ----
     @property
@@ -71,6 +74,7 @@ class Session:
         self.generation += 1
         self.base = 0
         self.key_n = 0
+        self.lz4_off = False
         return True
 
     def _fresh(self):
@@ -120,6 +124,8 @@ class Session:
             return False
         self.open_err = None
         log.info("设备已连上：fw=%#x caps=%#x max_payload=%d", self.info["fw"], self.caps, self.info["max_payload"])
+        if self.caps & ml.CAP_LZ4 and self.lz4 and not ml.lz4_available():
+            log.info("固件支持 RECT_LZ4（fw v11），但没装 python3-lz4：照发普通 RECT（整帧会慢一些）")
         return True
 
     # ---- 发送 ----
@@ -151,6 +157,8 @@ class Session:
         wmax = max(1, (maxp - 8) // 2)                      # max_payload 比一整行还小时按宽度也切
         out = bytearray()
         lk = self.link
+        lz = self.lz4 and not self.lz4_off and bool(self.caps & ml.CAP_LZ4) and ml.lz4_available()
+        n_lz = 0
         for c in (copies if self.caps & ml.CAP_COPY else ()):
             lk.seq = (lk.seq + 1) & 0xFF
             out += ml.encode(ml.COPY, lk.seq, ml.copy_payload(*c))
@@ -160,7 +168,9 @@ class Session:
                 n = max(1, (maxp - 8) // (w0 * 2))
                 for y0 in range(y, y + h, n):
                     lk.seq = (lk.seq + 1) & 0xFF
-                    out += ml.encode(ml.RECT, lk.seq, ml.rect_payload(fb, x0, y0, w0, min(n, y + h - y0)))
+                    t, pl = ml.rect_frame(fb, x0, y0, w0, min(n, y + h - y0), lz)
+                    n_lz += t == ml.RECT_LZ4
+                    out += ml.encode(t, lk.seq, pl)
         self.last_sent = self.mono()
         try:
             if out:
@@ -176,6 +186,9 @@ class Session:
         self.base = errs
         if not ok:
             log.info("PRESENT status=%d 出错计数 %d", a["status"], errs)
+            if n_lz:
+                self.lz4_off = True
+                log.warning("这批有 %d 条 RECT_LZ4 推坏了：到下次 HELLO 前只发普通 RECT", n_lz)
         return ok
 
     def poll_keys(self):
