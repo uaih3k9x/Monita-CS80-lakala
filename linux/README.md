@@ -33,9 +33,9 @@ git clone <本仓库> ~/.local/share/monita-cs80
 |---|---|---|
 | Python ≥ 3.9、Pillow | 渲染 | 必需 |
 | jeepney | D-Bus：MPRIS、logind | 没有就只显示时钟 / "未在播放"，不处理休眠 |
-| pyusb + libusb-1.0 | `--device usb` | 走串口 `/dev/ttyUSB*` 时不需要 |
+| pyusb（1.0 / 1.1+ 都行）+ libusb-1.0 | `--device usb` | 走串口 `/dev/ttyUSB*` 时不需要 |
 | pyserial | 串口 | 可选，没有就用 monita_link 自带的 termios 实现 |
-| wpctl 或 pactl | 音量键 | 有一个就行，都没有时音量键只打日志 |
+| wpctl 或 pactl | 音量键 | 有一个就行；wpctl 跑不通时自动改用 pactl；都没有时音量键只打日志 |
 
 只依赖会话 D-Bus（MPRIS）和系统 D-Bus（logind），**不连 X11 / Wayland、不截屏**，GNOME / KDE / sway / i3 都一样。
 
@@ -77,7 +77,7 @@ monita-cs80-linux --png out.png [--sample mac/Samples/lyrics-playing.json [--at 
 - 仓库只放调用代码，不含任何歌词或封面。本地缓存在 `~/.monita-cs80/lyrics/`（`MONITA_HOME` 可改）。
 - 取不到时的提示页：正在查找 → "正在查找歌词…"；找不到 / 接口出错 → "找不到歌词"；纯音乐 → "纯音乐，请欣赏"；没有播放器 → "未在播放"。
   除"未在播放"外，标题、进度条、段码屏照常显示。断网时 30 s 后自动重试。
-- 播放器给不出进度（部分浏览器）时，从"第一次看到这首"起估算，页面上标黄框"进度为估算"。
+- 播放器给不出进度（部分浏览器）时，按"这首歌在放的累计时长"估算（暂停不计），页面上标黄框"进度为估算"；之后读到真进度就改回来。
 - 封面：优先网易云的（后台线程取，不卡主循环）；没有时用播放器给的 `file://` 封面；`http(s)://` 的封面不取。
 
 ## systemd --user 和 udev
@@ -94,6 +94,7 @@ sudo udevadm control --reload && sudo udevadm trigger            # 再拔插一�
 ```
 
 - 服务挂 `default.target`，不挂 `graphical-session.target`（后者在 sway / i3 下不会启动）。
+- 设备不在时进程自己每 2 s 重连、不退出；退出码 2（缺中文字体、参数不对）是永久错误，服务不会反复重启（`RestartPreventExitStatus=2`），看 journal 补装字体后手动 `restart`。
 - udev 规则让 **ModemManager 忽略**这台设备（VID 2c7c 是 Quectel，ModemManager 会去发 AT 命令，打乱协议帧），
   并给当前座席用户 `uaccess`。文件号必须小于 73。
 - 无会话（开了 linger、只 ssh 登录）时 `uaccess` 不生效：改用规则里注释掉的组权限那行（`plugdev`；Fedora / Arch 没有这个组，

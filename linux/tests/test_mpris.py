@@ -5,6 +5,7 @@ import unittest
 
 from util import FakeClock, REPO
 import lyrics as L
+from monita_linux.schedule import position_at
 from monita_linux.sources import mpris as M
 from monita_linux.system.dbus import BusError
 
@@ -166,29 +167,91 @@ class Choose(unittest.TestCase):
         self.assertEqual([c for c in s2.bus.calls if c[0] == "call"], [])
 
 
+def shown(s, clk):
+    """屏上显示的进度（秒）：raw → snapshot → position_at，和 App 里的路径一样"""
+    return position_at(L.snapshot(s.get(), now=clk()), clk())
+
+
 class Estimate(unittest.TestCase):
     def test_position_missing_estimates_from_first_seen(self):
         players = {"firefox.instance_1_23": player(pos=None)}
         s, clk = src(players)
-        r1 = s.get()
+        self.assertAlmostEqual(shown(s, clk), 0.0)
         self.assertTrue(s.estimated)
-        self.assertEqual((r1["elapsedTimeMicros"], r1["timestampEpochMicros"]), (0, 1000 * 1_000_000))
         clk.advance(5)
-        r2 = s.get()
-        self.assertEqual(r2["timestampEpochMicros"], 1000 * 1_000_000)    # 固定在第一次看到这首的时刻
+        self.assertAlmostEqual(shown(s, clk), 5.0)
         players["firefox.instance_1_23"]["Metadata"]["xesam:title"] = "下一首"
         players["firefox.instance_1_23"]["Metadata"]["mpris:trackid"] = "/t/2"
-        r3 = s.get()
-        self.assertEqual(r3["timestampEpochMicros"], 1005 * 1_000_000)
+        self.assertAlmostEqual(shown(s, clk), 0.0)                  # 换歌从 0 起
 
     def test_position_stuck_at_zero_while_playing(self):
         s, clk = src({"x": player(pos=0)})
         s.get()
         self.assertFalse(s.estimated)                               # 刚切歌是 0 很正常
         clk.advance(3)
-        r = s.get()
+        self.assertAlmostEqual(shown(s, clk), 3.0)
         self.assertTrue(s.estimated)
-        self.assertEqual(r["timestampEpochMicros"], 1000 * 1_000_000)
+
+    def test_constant_trackid_song_change_resets(self):
+        """Chromium 的 trackid 是常量、NoTrack 也是：换歌要靠标题 / 歌手认出来"""
+        for tid in ("/org/chromium/MediaPlayer2/TrackList/TrackFooBar", "/org/mpris/MediaPlayer2/TrackList/NoTrack"):
+            players = {"chromium.instance9": player(title="A", pos=10_000_000, trackid=tid)}
+            s, clk = src(players)
+            s.get()
+            clk.advance(300)
+            players["chromium.instance9"] = player(title="B", pos=0, trackid=tid)
+            s.get()
+            self.assertFalse(s.estimated, tid)                      # 新歌第一眼是 0：正常，不估算
+            clk.advance(5)
+            players["chromium.instance9"]["Position"] = 5_000_000
+            self.assertAlmostEqual(shown(s, clk), 5.0)
+            players["chromium.instance9"] = player(title="C", pos=None, trackid=tid)
+            self.assertAlmostEqual(shown(s, clk), 0.0)              # 估算模式也从这首开始算
+
+    def test_estimate_pauses(self):
+        p = player(pos=None)
+        s, clk = src({"x": p})
+        s.get()
+        clk.advance(10)
+        self.assertAlmostEqual(shown(s, clk), 10.0)
+        p["PlaybackStatus"] = "Paused"
+        s.get()
+        clk.advance(60)
+        self.assertAlmostEqual(shown(s, clk), 10.0)                 # 暂停中停在 10 s，不是 0:00
+        p["PlaybackStatus"] = "Playing"
+        s.get()
+        clk.advance(2)
+        self.assertAlmostEqual(shown(s, clk), 12.0)                 # 暂停的 60 s 不算
+
+    def test_real_position_clears_estimate(self):
+        p = player(pos=0)
+        s, clk = src({"x": p})
+        s.get()
+        clk.advance(3)
+        s.get()
+        self.assertTrue(s.estimated)
+        clk.advance(1)
+        p["Position"] = 50_000_000                                  # 缓冲完了 / 拖了进度：用真值
+        self.assertAlmostEqual(shown(s, clk), 50.0)
+        self.assertFalse(s.estimated)
+        clk.advance(1)
+        p["Position"] = 0                                           # 拖回开头：真值 0，不是卡住
+        self.assertAlmostEqual(shown(s, clk), 0.0)
+        self.assertFalse(s.estimated)
+
+
+class FrozenPlayer(unittest.TestCase):
+    def test_timed_out_player_skipped_for_a_while(self):
+        s, clk = src({"a": player(title="A"), "b": player(title="B", status="Paused")})
+        s.bus.broken.add("a")
+        self.assertEqual(s.get()["title"], "B")
+        s.bus.broken.discard("a")
+        n = len(s.bus.calls)
+        clk.advance(1)
+        self.assertEqual(s.get()["title"], "B")                     # 30 s 内不再问它（每次问都要卡 0.5 s）
+        self.assertNotIn(("get", P + "a", "PlaybackStatus"), s.bus.calls[n:])
+        clk.advance(30)
+        self.assertEqual(s.get()["title"], "A")
 
 
 class LyricsGlue(unittest.TestCase):

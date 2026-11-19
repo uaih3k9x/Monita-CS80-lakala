@@ -1,4 +1,5 @@
 """Session：keepalive / 推帧判错 / 休眠 / caps 门控 / 断开重开（DESIGN.md §3.2）"""
+import struct
 import unittest
 
 from util import FakeClock
@@ -37,6 +38,23 @@ class Connect(unittest.TestCase):
         self.assertEqual(fac.opens, 0)
         clk.advance(1.1)
         self.assertTrue(s.connect_if_needed())
+
+    def test_open_error_warned_once_per_text(self):
+        """一直打不开（没装 udev 规则 EACCES）：同样的错只 warning 一次，换了错再 warning"""
+        s, fac, clk = make()
+        err = [PermissionError(13, "Access denied")]
+
+        def boom():
+            raise err[0]
+        s.open_port = boom
+        with self.assertLogs("monita.session", "DEBUG") as cm:
+            for _ in range(5):
+                s.connect_if_needed()
+                clk.advance(2.1)
+            err[0] = OSError(16, "busy")
+            s.connect_if_needed()
+        warns = [r for r in cm.records if r.levelname == "WARNING"]
+        self.assertEqual(len(warns), 2)
 
     def test_bad_hello_ack_not_up_no_rects(self):
         for bad in (dict(w=480), dict(h=800), dict(pixfmt=2), dict(proto=1)):
@@ -139,6 +157,31 @@ class Push(unittest.TestCase):
         sizes = [len(p) for t, p in fac.links[0].frames if t == ml.RECT]
         self.assertTrue(all(n <= 32768 for n in sizes))
         self.assertEqual(sum(n - 8 for n in sizes), 800 * 100 * 2)
+
+    def test_small_max_payload_splits_width(self):
+        """HELLO_ACK 的 max_payload 比一整行（8 + 800×2）还小：按宽度也要切"""
+        for mp in (1000, 100):
+            s, fac, clk = make()
+            fac_link = fac.link
+
+            def small(port, mp=mp):
+                lk = fac_link(port)
+                lk.info_reply["max_payload"] = mp
+                return lk
+            s.link_factory = small
+            s.connect_if_needed()
+            fb = bytes(range(256)) * (800 * 1280 * 2 // 256)
+            self.assertTrue(s.push(fb, ml.full_rects(max_payload=mp), 1))
+            got = bytearray(800 * 1280 * 2)
+            for t, p in fac.links[0].frames:
+                if t != ml.RECT:
+                    continue
+                self.assertLessEqual(len(p), mp)
+                x, y, w, h = struct.unpack("<4H", p[:8])
+                for r in range(h):
+                    o = ((y + r) * 800 + x) * 2
+                    got[o:o + w * 2] = p[8 + r * w * 2:8 + (r + 1) * w * 2]
+            self.assertEqual(bytes(got), fb, mp)
 
     def test_copy_gated_by_caps(self):
         s, fac, clk = make()

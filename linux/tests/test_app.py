@@ -256,6 +256,45 @@ class Power(unittest.TestCase):
         self.assertEqual(h.link.types()[-1], ml.SLEEP)
 
 
+class RunLoop(unittest.TestCase):
+    """真的 App.run()：sleep 拨假时钟；断开 / 睡着 / 空闲时每轮都要真睡（不许 sleep(0) 空转）"""
+
+    def drive(self, h, n=400):
+        sleeps = []
+
+        def sleep(dt):
+            sleeps.append(dt)
+            h.mono.advance(dt)
+            h.wall.advance(dt)
+            if len(sleeps) >= n:
+                h.app.done = True
+        h.app.run(sleep=sleep)
+        return sleeps
+
+    def assert_no_spin(self, sleeps):
+        self.assertEqual([d for d in sleeps if d <= 0], [])
+        self.assertGreater(sum(sleeps), len(sleeps) * 0.02)       # 400 轮至少走过 8 s 模拟时间
+
+    def test_idle_connected(self):
+        h = Harness(None)
+        self.assert_no_spin(self.drive(h))
+
+    def test_unplugged_after_connect(self):
+        h = Harness(playing())
+        h.run(1.0)
+        h.link.broken = True
+        h.fac.none = True
+        h.run(2.1)
+        self.assertFalse(h.sess.up)
+        self.assert_no_spin(self.drive(h))
+
+    def test_asleep(self):
+        h = Harness(playing())
+        h.app.post(("sleep", True))
+        h.run(1.0)
+        self.assert_no_spin(self.drive(h))
+
+
 class CoversTests(unittest.TestCase):
     def test_background_fetch_then_cached(self):
         import io
@@ -278,7 +317,8 @@ class CoversTests(unittest.TestCase):
         img = c.get("k", lambda: None)
         self.assertEqual(img.size, (220, 220))
 
-    def test_fetch_failure_cached_as_none(self):
+    def test_fetch_failure_retried_later(self):
+        """取失败（刚醒还没网）：60 s 内不重试，之后再取"""
         started = []
 
         class T:
@@ -287,11 +327,31 @@ class CoversTests(unittest.TestCase):
 
             def start(self):
                 pass
-        c = Covers(thread=T)
+        clk = FakeClock(0)
+        c = Covers(thread=T, mono=clk)
         c.get("k", lambda: (_ for _ in ()).throw(OSError("net")))
         started[0]()
+        clk.advance(30)
         self.assertIsNone(c.get("k", lambda: b""))
         self.assertEqual(len(started), 1)
+        clk.advance(31)
+        c.get("k", lambda: b"")
+        self.assertEqual(len(started), 2)
+
+    def test_cache_bounded_lru(self):
+        class Now:
+            def __init__(self, target, daemon=True):
+                self.target = target
+
+            def start(self):
+                self.target()
+        c = Covers(thread=Now, cap=3)
+        for k in "abcd":
+            c.get(k, lambda: None)
+        self.assertEqual(list(c.cache), ["b", "c", "d"])
+        c.get("b", lambda: None)                         # 用过的挪到最新
+        c.get("e", lambda: None)
+        self.assertEqual(list(c.cache), ["d", "b", "e"])
 
 
 if __name__ == "__main__":

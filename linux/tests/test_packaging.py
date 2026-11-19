@@ -24,6 +24,7 @@ class Packaging(unittest.TestCase):
         self.assertNotIn("graphical-session.target", s)
         self.assertRegex(s, r"ExecStart=\S*monita-cs80-linux --device usb")
         self.assertIn("Restart=on-failure", s)
+        self.assertIn("RestartPreventExitStatus=2", s.splitlines())   # 缺字体等永久错误（exit 2）不要每 3 s 重启
 
     def test_udev(self):
         name = [n for n in os.listdir(PK) if n.endswith(".rules")][0]

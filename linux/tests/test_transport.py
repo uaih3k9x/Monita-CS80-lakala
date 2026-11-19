@@ -143,6 +143,43 @@ class UsbPortTests(unittest.TestCase):
         self.assertEqual((info["w"], info["h"], info["pixfmt"], info["caps"], info["max_payload"]), (800, 1280, 1, 0xF7, 32768))
 
 
+class OldPyusb(unittest.TestCase):
+    """pyusb 1.0.x（Debian 11 的 python3-usb 1.0.2）没有 USBTimeoutError：超时是 errno=ETIMEDOUT 的 USBError"""
+
+    def setUp(self):
+        import errno
+        import sys
+        import types
+        self.errno = errno
+
+        class USBError(IOError):
+            pass
+        core = types.ModuleType("usb.core")
+        core.USBError = USBError
+        usb = types.ModuleType("usb")
+        usb.core, usb.util = core, types.ModuleType("usb.util")
+        self.saved = {k: sys.modules.get(k) for k in ("usb", "usb.core", "usb.util")}
+        sys.modules.update({"usb": usb, "usb.core": core, "usb.util": usb.util})
+        self.core = core
+
+    def tearDown(self):
+        import sys
+        for k, v in self.saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def test_timeout_by_errno(self):
+        d = FakeDev()
+        p = T.UsbPort(d, intf=7, util=FakeUtil(d))
+        d.fail = self.core.USBError(self.errno.ETIMEDOUT, "Operation timed out")
+        self.assertEqual(p.read(1), b"")
+        d.fail = self.core.USBError(self.errno.ENODEV, "No such device")
+        with self.assertRaises(OSError):
+            p.read(1)
+
+
 class OpenDeviceTests(unittest.TestCase):
     def test_spec_parsing(self):
         self.assertEqual(T.parse_spec("usb"), ("usb", 7))

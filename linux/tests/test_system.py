@@ -124,6 +124,30 @@ class Volume(unittest.TestCase):
         with self.assertLogs("monita.volume", "INFO"):
             v.step(6)
 
+    def test_wpctl_fails_falls_back_to_pactl(self):
+        """wpctl 在但不能用（老版本没有 -l / 跑的是 PulseAudio）：改用 pactl，只记一次日志"""
+        cmds = []
+
+        def run(cmd, **kw):
+            cmds.append(cmd)
+            rc = 1 if cmd[0] == "wpctl" else 0
+            return subprocess.CompletedProcess(cmd, rc, stdout="Volume: front-left: 50%\n" if cmd[0] == "pactl" else "", stderr="x")
+        v = volume.detect(which=lambda n: "/usr/bin/" + n, run=run)
+        with self.assertLogs("monita.volume", "WARNING") as cm:
+            v.step(6)
+        self.assertEqual([c[0] for c in cmds], ["wpctl", "pactl", "pactl", "pactl"])   # 失败的 set-volume 之后不再 set-mute
+        self.assertEqual(len(cm.output), 1)
+        cmds.clear()
+        v.step(-6)
+        self.assertEqual(cmds, [["pactl", "set-sink-volume", "@DEFAULT_SINK@", "-6%"]])
+
+    def test_wpctl_fails_no_pactl_keeps_wpctl(self):
+        fail = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="x")   # noqa: E731
+        v = volume.detect(which=lambda n: "/usr/bin/wpctl" if n == "wpctl" else None, run=fail)
+        with self.assertLogs("monita.volume", "WARNING"):
+            v.step(6)
+        self.assertEqual(v.kind, "wpctl")
+
     def test_timeout_does_not_raise(self):
         def boom(cmd, **kw):
             raise subprocess.TimeoutExpired(cmd, 2)

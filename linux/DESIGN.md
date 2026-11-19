@@ -207,12 +207,13 @@ Linux 没有 agent 数据源，所以"有人在等"恒为 false，蓝灯闪烁�
 3. 否则选状态为 Playing 的；有多个时，留在上一次选中的那个（避免两个都在放时来回跳），否则按名字排序取第一个。
 4. 都不在播放时，选最近一次处于 Playing 的那个；它已经退出了，就选任意一个 Paused 的；只剩 Stopped 的就返回 None。
 
-只对选中的播放器做 `GetAll`，其余只读 `PlaybackStatus`。每次 D-Bus 调用超时 0.5 s；某个播放器卡住或报错就当它不存在，不影响别的。
+只对选中的播放器做 `GetAll`，其余只读 `PlaybackStatus`。每次 D-Bus 调用超时 0.5 s；某个播放器卡住或报错就当它不存在，不影响别的，并且 30 s 内不再问它（否则每秒刷新都要在主循环里再卡 0.5 s，几个卡住的播放器叠起来能让固件以为主机走了）。
 
 宽容处理残缺的元数据（浏览器、部分 Electron 应用常见）：
 
 - 没有 `xesam:title`：返回 None（`snapshot()` 本来也会当 stopped）。
-- `Position` 读不到、报 NotSupported，或者正在播放却一直是 0：不再每次刷新 `timestampEpochMicros`，而是把"第一次看到这首歌的时刻"当 ts、elapsed 记 0，让进度从那时起外推，并在 payload 上标 `estimated=True`（页面显示黄框"进度为估算"）。`Lyrics.payload()` 会写死 `estimated=False`，由 `make_lyrics()` 包一层覆盖回来。
+- 认歌用 `(播放器, mpris:trackid, 标题, 歌手)`：Chromium 的 trackid 是常量，规范里的 `NoTrack` 也是，只看 trackid 会把换歌当成同一首。
+- `Position` 读不到、报 NotSupported，或者正在播放却连续 ≥ 2 s 都是 0：改用"这首歌处于 Playing 的累计时长"当进度（暂停的时间不算），并在 payload 上标 `estimated=True`（页面显示黄框"进度为估算"）。之后一旦读到非 0 的 Position（缓冲完、拖了进度）就改回真值。`Lyrics.payload()` 会写死 `estimated=False`，由 `make_lyrics()` 包一层覆盖回来。
 - `PlaybackStatus` 是 Stopped 时返回 None，页面显示"未在播放"。
 
 `make_lyrics()` 负责组装：`lyrics.Lyrics(np=MprisSource(...))`，`payload()` 原样复用。歌词搜索、打分匹配、缓存和 `cover(sid)` 都直接用 lyrics.py 里现成的。在进程内调用就够了，不起 HTTP 服务。
@@ -230,7 +231,7 @@ Linux 没有 agent 数据源，所以"有人在等"恒为 false，蓝灯闪烁�
 - artist 是列表时正确拼接；
 - length 缺失；
 - 多个播放器时的选择规则（含 playerctld 被排除、`--player` 前缀匹配实例号、两个都在播放时不来回跳）；
-- Position 缺失时 ts 固定在首次看到的时刻、`estimated=True`；
+- Position 缺失时按 Playing 累计时长估算、暂停不计、`estimated=True`；读到真值后改回；trackid 不变但标题变了算换歌；
 - 某个播放器的调用超时不影响选别的；
 - 把输出喂给 `lyrics.snapshot()`，得到和 `mac/Samples/lyrics-playing.json` 同形状的字段。
 
@@ -343,7 +344,7 @@ class Volume:               # Wpctl 或 Pactl，启动时按 which 选择
 | jeepney | D-Bus（MPRIS、logind） | 只在 Linux 上需要；Mac 开发和单测不需要 |
 | pyusb + libusb-1.0 | `--device usb` | 可选：走串口 `/dev/ttyUSB*` 时不需要 |
 | pyserial | 串口 | 可选：没有就用 monita_link 自带的 PosixPort |
-| wpctl 或 pactl | 音量 | 命令行工具，二者有一个就行；都没有时音量键只打日志 |
+| wpctl 或 pactl | 音量 | 命令行工具，二者有一个就行；wpctl 跑不通（老版本没有 `-l`、实际跑的是 PulseAudio）时改用 pactl；都没有时音量键只打日志 |
 
 **D-Bus 库选 jeepney，不选 dbus-next，** 原因有四点：
 
@@ -519,7 +520,7 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0901", ENV{ID_USB_
 
 - **没做 `schedule.next_wake`。** 主循环每个节拍（默认 0.2 s）算一次帧键，帧键是纯 Python 小元组，算一次远不到 1 ms；键没变就不画、不转 RGB565、不做差分。省电效果和按唤醒时刻睡一样，少一个函数。
 - **generation 变了不等节拍、立刻推整帧**（seg / ping 里触发的重 HELLO 也一样）；每一代只立刻试一次，推失败就回到按节拍重试，免得设备一直拒收时空转。
-- **封面缓存**是 `app.py` 里的 `Covers`（后台线程取、缓存成 220×220，取失败也缓存成 None，不反复请求）。
+- **封面缓存**是 `app.py` 里的 `Covers`（后台线程取、缓存成 220×220，只留最近 32 张；取失败 60 s 内不重试，之后再试）。
 - **RGB565 转换**用 Pillow 的通道运算（`render/canvas.py` 的 `to_rgb565`），和 `monita_link.rgb888_to_rgb565` 逐字节一致（有测试），一整帧几毫秒；纯 Python 版要一秒多。
 - **`MprisLyrics`** 是 `lyrics.Lyrics` 的子类：`_fallback()` 改成直接"未在播放"（不去翻网易云 Mac 客户端的播放缓存），`payload()` 把 `source` / `estimated` 改成 MPRIS 的实际情况。
 - **测试文件**：`test_volume` / `test_stats` / `test_power` 合成一个 `test_system.py`；另加 `test_packaging.py`（单元 / 规则的几条硬约束）和 `test_dbus_live.py`（有 jeepney + dbus-daemon 时起一个私有 dbus-daemon，走真 D-Bus 线协议测 MprisSource / Logind，包括 Inhibit 的 fd 传递）。

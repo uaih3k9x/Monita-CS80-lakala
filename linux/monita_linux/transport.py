@@ -3,6 +3,7 @@
 返回的端口对象给 monita_link.Link 用：read(n) / write(b) / in_waiting / reset_input_buffer() / close()。
 USB 走 pyusb（libusb）：接口 7，bulk OUT 0x07 / IN 0x8A（docs/protocol.md「传输层」）。
 """
+import errno
 import logging
 
 import monita_link as ml
@@ -17,11 +18,15 @@ class UsbPort:
     """pyusb 设备的一个接口当字节流用。超时读成 b''；USBError（拔掉 ENODEV / EIO）原样抛出，由 Session 当断开处理。"""
 
     def __init__(self, dev, intf=7, ep_out=EP_OUT, ep_in=EP_IN, util=None, timeout_error=None, chunk=1 << 20):
+        self.by_errno = False
         if util is None or timeout_error is None:
             import usb.core
             import usb.util
             util = util or usb.util
-            timeout_error = timeout_error or usb.core.USBTimeoutError
+            if timeout_error is None:       # pyusb 1.0.x 没有 USBTimeoutError：超时是 errno=ETIMEDOUT 的 USBError
+                timeout_error = getattr(usb.core, "USBTimeoutError", None)
+                self.by_errno = timeout_error is None
+                timeout_error = timeout_error or usb.core.USBError
         self.dev, self.intf, self.ep_out, self.ep_in = dev, intf, ep_out, ep_in
         self.util, self.timeout_error, self.chunk = util, timeout_error, chunk
         self.buf = bytearray()
@@ -34,8 +39,9 @@ class UsbPort:
     def _fill(self, timeout_ms):
         try:
             self.buf += bytes(self.dev.read(self.ep_in, READ_BLOCK, timeout_ms))
-        except self.timeout_error:
-            pass
+        except self.timeout_error as e:
+            if self.by_errno and getattr(e, "errno", None) != errno.ETIMEDOUT:
+                raise
 
     @property
     def in_waiting(self):

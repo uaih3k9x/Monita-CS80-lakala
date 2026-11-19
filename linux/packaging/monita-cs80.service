@@ -12,6 +12,8 @@ Description=Monita-CS80 副屏上位机
 ExecStart=%h/.local/share/monita-cs80/linux/monita-cs80-linux --device usb
 Restart=on-failure
 RestartSec=3
+# 退出码 2 = 永久错误（缺中文字体 / 参数不对），重启也没用：别每 3 s 刷一遍日志
+RestartPreventExitStatus=2
 
 [Install]
 WantedBy=default.target

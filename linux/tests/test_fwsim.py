@@ -275,6 +275,31 @@ class FwsimTests(unittest.TestCase):
                 self.assertEqual(len(res), 24)
 
 
+class SmallMaxPayload(unittest.TestCase):
+    """max_payload 比一整行（8 + 800×2 = 1608）还小：Session 按宽度切，整帧照样上屏、一个长度错都没有"""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("cc"):
+            raise unittest.SkipTest("没有 cc，跳过 fwsim 对拍")
+        build_sim()
+
+    def test_full_frame_at_1000(self):
+        sim = CF.Sim(SIM, ["--max-payload", "1000"])
+        sess = Session(lambda: ml.open_port(sim.pty), clock=lambda: 1784081587)
+        try:
+            self.assertTrue(sess.connect_if_needed())
+            self.assertEqual(sess.info["max_payload"], 1000)
+            fb = bytes(range(256)) * (800 * 1280 * 2 // 256)
+            self.assertTrue(sess.push(fb, ml.full_rects(max_payload=1000), 1))
+            st = sim.stat()
+            self.assertEqual(st["len_err"], 0)
+            self.assertEqual(st["screen_crc"], zlib.crc32(fb) & 0xFFFFFFFF)
+        finally:
+            sess.close()
+            sim.close()
+
+
 def _one(i):
     """子进程里跑第 i 种配置：HELLO 的 tz 是进程级的，各配置的时区（conformance.CONFIGS 的 zone）互不干扰"""
     cfg = CF.CONFIGS[i]

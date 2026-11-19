@@ -15,6 +15,7 @@ import logging
 import queue
 import threading
 import time
+from collections import OrderedDict
 from urllib.parse import unquote, urlparse
 
 import monita_link as ml
@@ -28,24 +29,27 @@ FULL_EVERY_S = 3600
 
 
 class Covers:
-    """封面在后台线程取（Lyrics.cover 是同步 HTTP，超时 8 s，不能卡主循环）；解码缩放成 220×220 缓存。取失败也缓存成 None"""
+    """封面在后台线程取（Lyrics.cover 是同步 HTTP，超时 8 s，不能卡主循环）；解码缩放成 220×220 缓存。
+    缓存只留最近用过的 cap 张（每张 ~145 KB）；取失败（抛异常）不缓存，retry_s 之后再试——刚醒还没网时也能补上"""
 
-    def __init__(self, size=220, thread=threading.Thread):
-        self.size, self.thread = size, thread
-        self.cache = {}
+    def __init__(self, size=220, thread=threading.Thread, mono=time.monotonic, cap=32, retry_s=60.0):
+        self.size, self.thread, self.mono, self.cap, self.retry_s = size, thread, mono, cap, retry_s
+        self.cache = OrderedDict()
+        self.failed = {}                # key -> 到这个时刻之前不重试
         self.pending = set()
         self.lock = threading.Lock()
 
     def get(self, key, load):
         with self.lock:
             if key in self.cache:
+                self.cache.move_to_end(key)
                 return self.cache[key]
-            if key in self.pending:
+            if key in self.pending or self.mono() < self.failed.get(key, 0.0):
                 return None
             self.pending.add(key)
 
         def work():
-            img = None
+            img, ok = None, True
             try:
                 data = load()
                 if data:
@@ -53,9 +57,18 @@ class Covers:
                     img = Image.open(io.BytesIO(data)).convert("RGB").resize((self.size, self.size))
             except Exception as e:
                 log.info("封面取不到：%s", e)
+                ok = False
             with self.lock:
-                self.cache[key] = img
                 self.pending.discard(key)
+                now = self.mono()
+                if not ok:
+                    self.failed = {k: t for k, t in self.failed.items() if t > now}
+                    self.failed[key] = now + self.retry_s
+                    return
+                self.failed.pop(key, None)
+                self.cache[key] = img
+                while len(self.cache) > self.cap:
+                    self.cache.popitem(last=False)
         self.thread(target=work, daemon=True).start()
         return None
 
@@ -239,5 +252,6 @@ class App:
         while not self.done:
             self.step()
             if not self.done:
-                nxt = min(self.due.values() or [self.mono()])
-                sleep(max(0.0, min(0.05, nxt - self.mono())))
+                now = self.mono()               # 已过期的项是这一轮被跳过的（没连上 / 睡着），不能拿来算等多久
+                nxt = min([t for t in self.due.values() if t > now] or [now + 0.05])
+                sleep(min(0.05, nxt - now))

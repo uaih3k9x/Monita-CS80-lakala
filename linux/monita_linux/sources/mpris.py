@@ -2,7 +2,9 @@
 
 选播放器：去掉 playerctld（转发代理）；--player 按总线名后缀前缀匹配（浏览器 / VLC 带实例号）；
 否则 Playing 的优先（多个都在放时留在上一次选中的，不来回跳）；都没在放时选最近在放的那个，它没了就任意一个 Paused 的。
-Position 读不到 / 播放中一直是 0：从"第一次看到这首"起外推，并标 estimated。
+Position 读不到 / 播放中一直是 0：改用"这首歌处于 Playing 的累计时长"当进度（暂停不计），并标 estimated；
+之后一旦读到非 0 的 Position 就改回真值。认歌用 (播放器, trackid, 标题, 歌手)：Chromium 的 trackid 是常量，NoTrack 也是。
+PlaybackStatus 都读不到（卡住 / 报错）的播放器 30 s 内不再问（每问一次要卡主循环 0.5 s）。
 """
 import time
 
@@ -14,6 +16,7 @@ PREFIX = "org.mpris.MediaPlayer2."
 PATH = "/org/mpris/MediaPlayer2"
 PLAYER = "org.mpris.MediaPlayer2.Player"
 STUCK_ZERO_S = 2.0
+SKIP_BROKEN_S = 30.0
 
 
 class MprisSource:
@@ -23,9 +26,11 @@ class MprisSource:
         self.last_playing = None
         self.estimated = False
         self.art_url = None
-        self.track = None               # (播放器, trackid / 标题)
-        self.first_seen = 0.0
-        self.est_track = None
+        self.track = None               # (播放器, trackid, 标题, 歌手)
+        self.played = 0.0               # 这首歌 Playing 的累计秒数（估算模式的进度）
+        self.tick = None                # 上一次 get() 的 (时刻, 是否 Playing, rate)
+        self.zero_since = None          # Position 从什么时候起一直是 0
+        self.broken = {}                # 总线名 -> 到这个时刻之前不再问
 
     def _players(self):
         try:
@@ -33,13 +38,17 @@ class MprisSource:
         except BusError:
             return {}
         out = {}
+        now = self.clock()
         for n in sorted(names):
             if not n.startswith(PREFIX) or n[len(PREFIX):].split(".")[0] == "playerctld":
                 continue
+            if now < self.broken.get(n, 0.0):
+                continue
             try:
                 out[n] = self.bus.get(n, PATH, PLAYER, "PlaybackStatus")
+                self.broken.pop(n, None)
             except BusError:
-                continue                # 卡住 / 报错的当它不存在
+                self.broken[n] = now + SKIP_BROKEN_S     # 卡住 / 报错的当它不存在，一阵子不再问
         return out
 
     def _choose(self, st):
@@ -74,26 +83,36 @@ class MprisSource:
             return None
         now = self.clock()
         playing = st[name] == "Playing"
-        track = (name, md.get("mpris:trackid") or title)
+        artist = md.get("xesam:artist")
+        artist = "/".join(artist) if isinstance(artist, (list, tuple)) else (artist or "")
+        rate = props.get("Rate", 1.0)
+        track = (name, md.get("mpris:trackid"), title, artist)
         if track != self.track:
-            self.track, self.first_seen = track, now
+            self.track, self.played, self.tick = track, 0.0, None
+            self.estimated, self.zero_since = False, None
+        elif self.tick and self.tick[1]:
+            self.played += (now - self.tick[0]) * (self.tick[2] or 0)
+        self.tick = (now, playing, rate)
         pos = props.get("Position")
         if pos is None:
             try:
                 pos = self.bus.get(name, PATH, PLAYER, "Position")
             except BusError:
                 pos = None
-        if pos is None or (playing and pos == 0 and now - self.first_seen >= STUCK_ZERO_S):
-            self.est_track = track
-        self.estimated = self.est_track == track
-        artist = md.get("xesam:artist")
-        raw = dict(title=title, artist="/".join(artist) if isinstance(artist, (list, tuple)) else (artist or ""),
-                   album=md.get("xesam:album") or "", playing=playing, playbackRate=props.get("Rate", 1.0),
-                   bundleIdentifier=name[len(PREFIX):])
-        if self.estimated:
-            raw.update(elapsedTimeMicros=0, timestampEpochMicros=int(self.first_seen * 1_000_000))
+        if pos is None:
+            self.estimated = True
+        elif pos != 0:
+            self.estimated, self.zero_since = False, None       # 读到真值了（缓冲完 / 拖了进度）：改回真值
         else:
-            raw.update(elapsedTimeMicros=int(pos), timestampEpochMicros=int(now * 1_000_000))
+            self.zero_since = now if self.zero_since is None else self.zero_since
+            if playing and now - self.zero_since >= STUCK_ZERO_S:
+                self.estimated = True                           # 播放中一直是 0：卡住了
+        if not self.estimated:
+            self.played = pos / 1e6
+        raw = dict(title=title, artist=artist, album=md.get("xesam:album") or "", playing=playing, playbackRate=rate,
+                   bundleIdentifier=name[len(PREFIX):])
+        elapsed = self.played * 1e6 if self.estimated else pos
+        raw.update(elapsedTimeMicros=int(elapsed), timestampEpochMicros=int(now * 1_000_000))
         if md.get("mpris:length"):
             raw["durationMicros"] = int(md["mpris:length"])
         self.art_url = md.get("mpris:artUrl")

@@ -31,6 +31,7 @@ class Session:
         self.retry_at = 0.0
         self.base = 0                   # PRESENT ACK 的出错计数基线（crc_err + len_err + bad_param）
         self.key_n = 0
+        self.open_err = None            # 上一次打不开设备的错（日志去重）
 
     # ---- 状态 ----
     @property
@@ -98,7 +99,9 @@ class Session:
         try:
             port = self.open_port()
         except Exception as e:
-            log.warning("打不开设备：%s", e)
+            msg = "%s: %s" % (type(e).__name__, e)
+            (log.debug if msg == self.open_err else log.warning)("打不开设备：%s", msg)   # 同样的错每 2 s 一次，只 warning 一次
+            self.open_err = msg
             port = None
         if port is None:
             self.retry_at = self.mono() + RETRY_S
@@ -115,6 +118,7 @@ class Session:
         self.link.clock = self.clock
         if not self._hello():
             return False
+        self.open_err = None
         log.info("设备已连上：fw=%#x caps=%#x max_payload=%d", self.info["fw"], self.caps, self.info["max_payload"])
         return True
 
@@ -144,17 +148,19 @@ class Session:
         if not self._fresh() or self.generation != g:
             return False
         maxp = min(self.info["max_payload"], 32768)
-        rows_max = lambda w: max(1, (maxp - 8) // (w * 2))   # noqa: E731
+        wmax = max(1, (maxp - 8) // 2)                      # max_payload 比一整行还小时按宽度也切
         out = bytearray()
         lk = self.link
         for c in (copies if self.caps & ml.CAP_COPY else ()):
             lk.seq = (lk.seq + 1) & 0xFF
             out += ml.encode(ml.COPY, lk.seq, ml.copy_payload(*c))
         for (x, y, w, h) in rects:
-            n = rows_max(w)
-            for y0 in range(y, y + h, n):
-                lk.seq = (lk.seq + 1) & 0xFF
-                out += ml.encode(ml.RECT, lk.seq, ml.rect_payload(fb, x, y0, w, min(n, y + h - y0)))
+            for x0 in range(x, x + w, wmax):
+                w0 = min(wmax, x + w - x0)
+                n = max(1, (maxp - 8) // (w0 * 2))
+                for y0 in range(y, y + h, n):
+                    lk.seq = (lk.seq + 1) & 0xFF
+                    out += ml.encode(ml.RECT, lk.seq, ml.rect_payload(fb, x0, y0, w0, min(n, y + h - y0)))
         self.last_sent = self.mono()
         try:
             if out:
