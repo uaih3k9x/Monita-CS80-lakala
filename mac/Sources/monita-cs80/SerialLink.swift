@@ -252,7 +252,7 @@ final class DeviceLink {
 
     /// PRESENT 10 s 没应答：先补一条 PING（短写，能把卡在设备 USB 里的满包尾巴推出来）再决定断不断。
     /// 这批的 PRESENT ACK 跟着 PING 一起到 = 批次卡在设备侧 USB（最后一包满包、没短包收尾，见 MonitaCore usbPadded），不是固件丢帧；
-    /// 这时连接留着（不重新 HELLO，设备计数不清零，方便看），调用方照样推整帧（设备早已 5 s 没帧回了开机画面）。PING 也不回才断开
+    /// 这时先把 PING 带回的设备计数打出来，再重新 HELLO（不关端口、不重开 USB），调用方照样推整帧。PING 也不回才断开
     private func stalledProbe(_ port: LinkPort, present s: UInt8) {
         seq &+= 1
         let ps = seq
@@ -267,7 +267,8 @@ final class DeviceLink {
                     log(String(format: "PRESENT 10 s 没有应答，补一条 PING 后%@（批长 %d 字节，%% 512 = %d）；设备 crc_err=%u len_err=%u bad=%u",
                                gotPresent ? "它的 ACK 才到：这批卡在设备侧 USB 里" : "PING 有应答、PRESENT 的 ACK 没来",
                                lastPushBytes, lastPushBytes % 512, a.crcErr, a.lenErr, a.badParam))
-                    errBase = a.crcErr + a.lenErr + a.badParam; badBase = a.badParam
+                    // 设备 5 s 没帧早已回开机画面（背光强开、灯回心跳）：照"隔太久重新 HELLO"的路子收拾（connectIfNeeded 返回 true → 推整帧、重发灯）
+                    if hello() { rehelloed = true }
                     return
                 }
             }

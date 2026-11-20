@@ -19,7 +19,7 @@ func runStress(_ link: DeviceLink, seconds: Int) -> Bool {
         fails.append("\(stamp()) \(what)")
         print("  [\(stamp())] FAIL \(what)，等重连…")
         let t = Date()
-        // PRESENT 超时但 PING 有应答时连接还在（SerialLink stalledProbe），不用重连
+        // PRESENT 超时但 PING 有应答时连接还在、已重新 HELLO（SerialLink stalledProbe），不用重开
         while !link.isUp && !link.connectIfNeeded() { if Date().timeIntervalSince(t) > 30 { break }; Thread.sleep(forTimeInterval: 0.3) }
         print(String(format: "  [%@] 重连用了 %.1f s", stamp(), Date().timeIntervalSince(t)))
         _ = link.push(fullRects(), gen.fb, frameID: frame)
