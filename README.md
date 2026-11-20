@@ -39,11 +39,12 @@
 - 锁屏：Mac 锁屏时换成桌面壁纸 + 小时钟 + 留言条（名字可配置；拿不到壁纸时回退成上图的 CDE 锁屏框）。
 - 时钟页：按 ≡ 键在歌词页和时钟页之间切换（fw v8）。
 - 按键（fw v8）：`+` / `−` 调 Mac 音量，查询键 播放 / 暂停，≡ 切页。状态灯：播放中绿灯常亮；没连上 Mac 时蓝灯 2 s 亮 1 s 灭（同原厂心跳）。
-- 断开 / 休眠（fw v10，还没上机）：Mac 那边 5 s 没动静（拔线、进程退出）大屏回开机版权页；Mac 睡眠 / 关显示器时背光、段码屏、灯全关，
+- 断开 / 休眠（fw v10，固件已在机，这几项还没在真机上逐项验证）：Mac 那边 5 s 没动静（拔线、进程退出）大屏回开机版权页；Mac 睡眠 / 关显示器时背光、段码屏、灯全关，
   Mac 醒来自动接上；没连 Mac 满 10 min 也自己关掉，按任意键看一眼。
-- 整帧压缩（fw v11，还没上机）：开机 / 唤醒 / 重连 / 切页 / 锁屏切换推的整帧用 LZ4 压（2000 KB → 30–90 KB），
-  预计从 ≈ 350 ms 降到 ≈ 50 ms；旧固件、或 Linux 版没装 `python3-lz4` 时自动照发不压缩的。`--no-lz4` 关掉做对比。
-- 沉浸模式（fw v9，还没上机）：整屏只有歌词，当前句大字居中，离得越远越淡；切句时整屏缓动上滚——**滚动只改扫描基址，一个像素都不搬**，
+- 整帧压缩（fw v11，**实测**）：开机 / 唤醒 / 重连 / 切页 / 锁屏切换推的整帧用 LZ4 压（2000 KB → 30–90 KB）。
+  Mac `--bench` 测试图整帧 381 ms → 80.5 ms（测试图特别好压，带照片壁纸的真实画面提升小一些，见下面"跑基准"）；
+  旧固件、或 Linux 版没装 `python3-lz4` 时自动照发不压缩的，旧上位机连 v11 固件也照常可用。`--no-lz4` 关掉做对比。
+- 沉浸模式（fw v9，固件已在机，还没在真机上专门验证）：整屏只有歌词，当前句大字居中，离得越远越淡；切句时整屏缓动上滚——**滚动只改扫描基址，一个像素都不搬**，
   Mac 只发新露出来的那一句。`--immersive` 开机就进（fw v9 时长按查询键也能切，容易误触，已去掉）。
 
 段码屏展示模式（示意图，代码画的，按功能分区摆放，不是玻璃的真实排布）：
@@ -126,18 +127,32 @@ bash fw/build.sh all        # 含 diag/
 
 产物在 `fw/build/*.bin`，写到 NOR `0x60270000`。各版本（HELLO_ACK 的 `fw_ver`；`proto_ver` 一直是 0，新功能都靠 `caps` 位声明）：
 
-| fw | 加了什么 | `caps` |
-|---|---|---|
-| v2 | COPY（画布内搬矩形，歌词滚动） | bit2 |
-| v4 | 跨缓冲 COPY、默认立即翻页 | |
-| v6 | 三缓冲 | bit3 |
-| v7 | 开机版权页 | |
-| v8 | 按键 KEY + 状态灯 LED | bit4、bit5 |
-| v9 | 沉浸模式 IMM_*（零拷贝滚动） | bit6 |
-| v10 | 主机走了回开机画面、SLEEP、10 min 没主机自动休眠 | bit7 |
-| v11 | RECT_LZ4（LZ4 压缩的 RECT，整帧快 ~6 倍，估计值） | bit8 |
+| fw | 加了什么 | `caps` | 真机 |
+|---|---|---|---|
+| v2 | COPY（画布内搬矩形，歌词滚动） | bit2 | 实测 |
+| v4 | 跨缓冲 COPY、默认立即翻页 | | 实测 |
+| v6 | 三缓冲 | bit3 | 实测（滚动 41 ms/帧） |
+| v7 | 开机版权页 | | 在机 |
+| v8 | 按键 KEY + 状态灯 LED | bit4、bit5 | 在机 |
+| v9 | 沉浸模式 IMM_*（整屏歌词，滚动 = 改扫描基址，零拷贝）；v10 起去掉了长按进入 | bit6 | 在机，未专门验证 |
+| v10 | 主机 5 s 没动静回开机画面、SLEEP 指令 / 10 min 没主机自动休眠（关背光、段码屏、灯）、Mac 睡眠联动 | bit7 | 在机，未逐项验证 |
+| v11 | RECT_LZ4（0x23，LZ4 压缩的 RECT，压缩后 < 3/4 才发，推坏了本次连接内粘滞关闭）、DIAG 33 设备内 LZ4 自测 | bit8 | **实测**（见"跑基准"） |
+
+"在机" = 设备上现在刷的固件已包含这一版，但没有专门的真机测量；"实测" = 有真机测量数字。
 
 刷写要在 **Windows** 上让模组进下载模式（macOS 认不出下载态）。**刷机前务必先做整片备份**，刷写流程和风险见 [docs/r05-notes.md](docs/r05-notes.md)。
+
+### 分支
+
+改动按分支链叠上去（每个分支基于前一个），都已推到 GitHub，**还没合进 `main`**：
+
+| 分支 | 内容 | 状态 |
+|---|---|---|
+| `main` | fw v9 为止（按键、状态灯、沉浸模式）+ Mac 上位机 | |
+| `fwsim-conformance` | `tools/fwsim/` 固件副作用对拍模拟器 + Python / Swift 上位机对拍、Python 参考实现补到 v9 | 只在主机上跑 |
+| `fw-v10-hostlost` | fw v10：主机断开回开机画面、SLEEP / 自动休眠、Mac 睡眠联动 | 固件在机，功能未逐项验证 |
+| `linux-host` | `linux/` Linux 上位机 | 测试 + fwsim 对拍通过，**未上真机** |
+| `fw-v11-lz4` | fw v11：RECT_LZ4 + DIAG 33，三个上位机都支持 | **实测** |
 
 **Mac 端**（macOS 13+，Command Line Tools 即可）：
 
@@ -173,6 +188,41 @@ macOS 上模组的串口类接口是厂商类（0xFF），系统不绑驱动、*
 Linux / 有串口驱动时照旧写串口路径：`--device /dev/ttyUSB0`。
 歌词滚动动画（`--no-scroll` 关）要 fw v2 的 COPY；连的是 v1 固件时自动不滚。
 
+### 跑基准
+
+直连设备时先停掉常驻的上位机（USB 接口是独占的）。
+
+```sh
+.build/release/monita-cs80 --device usb --bench               # 链路：HELLO / PING / 整帧 + FBCRC / 小块差分 / COPY 滚动 / 裸吞吐 / SEG
+.build/release/monita-cs80 --device usb --bench --no-lz4      # 同上但整帧不压，A/B 对比
+.build/release/monita-cs80 --device usb --bench-device 64     # fw v11 DIAG 33：设备内 LZ4 解码 / 落帧自测 64 次，屏上不动
+python3 tools/host-ref/cs80.py PORT bench 10 docs/img/clock.png docs/img/lyrics-playing.png   # 有串口的系统（加 --no-lz4 对比）
+python3 tools/host-ref/cs80.py PORT --bench-device 64
+linux/monita-cs80-linux --device usb --bench-device 64        # Linux 版（未上真机）
+python3 tools/lz4bench/bench.py                               # 不用设备：真实渲染帧的压缩比 / 主机侧耗时
+sh tools/lz4bench/qemu/run.sh                                 # 不用设备：QEMU 指令计数粗估解码耗时，见 tools/lz4bench/QEMU.md
+```
+
+fw v11 真机实测（Mac 上位机，`--bench` / `--bench-device 64`）：
+
+| 项 | 不开 LZ4 | 开 LZ4 |
+|---|---|---|
+| 测试图整帧（64 条 + PRESENT） | 平均 381 ms，线上 2,049,164 B | 平均 80.5 ms，线上 43,564 B |
+| 小块差分 | 32.4 ms | ≈ 25–27 ms |
+| COPY 滚动（设备端搬运） | ≈ 40–46 ms/帧 | 基本不变 |
+| 裸吞吐 | ≈ 7.7 MB/s | |
+
+测试图特别好压缩，带壁纸的真实画面提升会小一些（照片部分压不过 3/4 门槛，照发 RECT）。
+
+| 设备内自测（DIAG 33） | 结果 |
+|---|---|
+| 一条 32000 B 条带，输入在 RAM，解码 | 均值 216 µs |
+| 同一条，暂存区 → 帧缓冲（落帧） | 均值 194 µs |
+| 折合整帧（×64） | 解码 13.8 ms + 落帧 12.4 ms ≈ 26 ms |
+| CPU 整屏拷贝 2 MB | ≈ 23 ms（≈ 89 MB/s） |
+
+QEMU 指令计数的事前估计是解码 10–19 ms/帧，和实测 13.8 ms 吻合。旧上位机连 v11 固件照常可用（不看 bit8 就只发 RECT）。
+
 **歌词数据源**（只用 Python 标准库）：
 
 ```sh
@@ -185,7 +235,8 @@ node --test tools/lyrics/tests/
 ## 欢迎贡献
 
 Windows / Linux 上位机非常欢迎有兴趣的朋友来写——我只写了 macOS 的 Swift 版，因为我懒了😂
-Linux 版已经有了一个 Python 实现（MPRIS + logind + pyusb，见 [linux/README.md](linux/README.md)），还缺真机验证，欢迎试用反馈；Windows 版仍然空着。
+Linux 版已经有了一个 Python 实现（MPRIS + logind + pyusb，见 [linux/README.md](linux/README.md)），功能和 Mac 版对齐，有完整测试、和 fwsim 对拍通过，
+但**还没上真机**，欢迎试用反馈；Windows 版仍然空着。
 
 设备那一侧说的是平台无关的 USB 串口协议（[docs/protocol.md](docs/protocol.md)），能开串口、能画一张 800×1280 的图，
 就能当它的上位机。协议还是草案，有想法欢迎开 issue 一起定。

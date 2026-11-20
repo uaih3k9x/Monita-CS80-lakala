@@ -2,7 +2,7 @@
 
 > 状态：**v0，已实现并实机跑通**（固件 `fw/app.c` + `fw/link/proto.h`，参考上位机 `tools/host-ref/`、`mac/`）。
 > fw v8 加的 KEY / LED、fw v9 加的沉浸模式 IMM_*、fw v10 加的 SLEEP / 主机走了回开机画面、fw v11 加的 RECT_LZ4（压缩的 RECT）
-> 都是向后兼容的增量（`caps` 新位，`proto_ver` 不变：旧上位机照旧能用新固件，新上位机看 `caps` 降级），**还没上机**。
+> 都是向后兼容的增量（`caps` 新位，`proto_ver` 不变：旧上位机照旧能用新固件，新上位机看 `caps` 降级）。fw v11 的 RECT_LZ4 / DIAG 33 已上真机实测（数字见 README "跑基准"）；v9 / v10 的功能还没在真机上逐项验证。
 > 协议与平台无关：能打开 USB 串口、能画一张 800×1280 的图，就能当上位机。以后改动会升 `proto_ver`。
 
 设计原则：**简单、流式、设备侧不需要大缓冲**。设备 app 只有 128 KiB RAM，一帧 payload 最多 32 KiB，
@@ -355,7 +355,10 @@ fw v6 起，会动缓冲的旧 DIAG（2/3/5/6/10、20/22/24/25 等）执行前�
 
 整帧是少数情况（切页、重连），日常是小块差分，所以 v0 不做压缩；fw v11 加了 RECT_LZ4（见下）。
 
-### RECT_LZ4 的基准（fw v11，主机上测；设备侧是**估计，等真机验证**）
+### RECT_LZ4 的基准（fw v11，主机上测；下面设备侧是事前估计）
+
+> 真机实测（Mac `--bench` / `--bench-device 64`）：测试图整帧 381 ms → 80.5 ms；DIAG 33 折合整帧解码 13.8 ms + 落帧 12.4 ms ≈ 26 ms，
+> CPU 整屏拷贝 2 MB ≈ 23 ms（≈ 89 MB/s，比下面按 64 MB/s 估的快）。详见 README "跑基准"。
 
 `python3 tools/lz4bench/bench.py`：12 张真实渲染帧（`docs/img`、`linux/docs/img` 的 800×1280 截图），按上位机的切法（整行宽 20 行一条，32000 B 原始）压缩。
 
