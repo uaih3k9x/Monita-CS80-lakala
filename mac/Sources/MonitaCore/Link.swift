@@ -220,3 +220,10 @@ public func encodeBatch(_ rects: [LinkRect], _ buf: [UInt16], width: Int = scree
     let (out, s, _) = encodeBatchLz4(rects, buf, width: width, copies: copies, frameID: frameID, lz4: false, seq: &seq)
     return (out, s)
 }
+
+/// 每次写 USB 之前补齐（DeviceLink.write）：长度正好是 64 的倍数（FS 64 / HS 512 / SS 1024 最大包长的公约数）就在末尾补一个 0x00。
+/// 原因：bulk OUT 的最后一包是满包时传输没有"短包"收尾；这个模组（Quectel 2c7c，Quectel 的 Linux 驱动指南要求这种长度补 ZLP）
+/// 收到满包会一直等下一个短包才把数据交给 ql_uart_read，于是一批的 PRESENT 卡在设备的 USB 里，直到下一次写（重新 HELLO）才放出来。
+/// 0x00 落在两帧之间：固件拆帧器在找同步字（lk_feed SYNC0）时直接跳过，不计错。
+public let usbPadUnit = 64
+public func usbPadded(_ b: [UInt8]) -> [UInt8] { !b.isEmpty && b.count % usbPadUnit == 0 ? b + [0] : b }

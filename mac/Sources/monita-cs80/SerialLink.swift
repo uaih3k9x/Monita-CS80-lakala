@@ -127,8 +127,11 @@ final class DeviceLink {
 
     private func nowS() -> Double { Date().timeIntervalSince1970 }
 
+    /// false = 不补齐（--no-usb-pad，真机 A/B 复现"PRESENT 没有应答"用；MonitaCore usbPadded）
+    var usbPad = true
+
     private func write(_ port: LinkPort, _ bytes: [UInt8]) -> Bool {
-        guard port.write(bytes) else { return false }
+        guard port.write(usbPad ? usbPadded(bytes) : bytes) else { return false }
         ka.sent(nowS: nowS())
         return true
     }
@@ -247,6 +250,31 @@ final class DeviceLink {
         if freshen(), call(LinkType.ping) == nil { drop("PING 超时") }
     }
 
+    /// PRESENT 10 s 没应答：先补一条 PING（短写，能把卡在设备 USB 里的满包尾巴推出来）再决定断不断。
+    /// 这批的 PRESENT ACK 跟着 PING 一起到 = 批次卡在设备侧 USB（最后一包满包、没短包收尾，见 MonitaCore usbPadded），不是固件丢帧；
+    /// 这时连接留着（不重新 HELLO，设备计数不清零，方便看），调用方照样推整帧（设备早已 5 s 没帧回了开机画面）。PING 也不回才断开
+    private func stalledProbe(_ port: LinkPort, present s: UInt8) {
+        seq &+= 1
+        let ps = seq
+        guard write(port, encodeFrame(type: LinkType.ping, seq: ps, payload: [])) else { drop("写失败"); return }
+        var gotPresent = false
+        let end = Date().addingTimeInterval(2)
+        while Date() < end {
+            guard let data = port.read(timeoutMs: 50) else { drop("读失败"); return }
+            for f in feed(data) where f.type == LinkType.ack {
+                if f.seq == s { gotPresent = true }
+                if f.seq == ps, let a = AckStats(f.payload) {
+                    log(String(format: "PRESENT 10 s 没有应答，补一条 PING 后%@（批长 %d 字节，%% 512 = %d）；设备 crc_err=%u len_err=%u bad=%u",
+                               gotPresent ? "它的 ACK 才到：这批卡在设备侧 USB 里" : "PING 有应答、PRESENT 的 ACK 没来",
+                               lastPushBytes, lastPushBytes % 512, a.crcErr, a.lenErr, a.badParam))
+                    errBase = a.crcErr + a.lenErr + a.badParam; badBase = a.badParam
+                    return
+                }
+            }
+        }
+        drop("PRESENT 没有应答，PING 也没有")
+    }
+
     /// 推一批 COPY（固件不支持就不发，调用方别给）+ 矩形（RGB565 整帧 buf 里截取）+ PRESENT。失败（断开、超时、设备侧计到新的坏帧）返回 false，调用方下次推整帧
     func push(_ rects: [LinkRect], _ buf: [UInt16], copies: [LinkCopy] = [], frameID: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -263,9 +291,9 @@ final class DeviceLink {
         rs += rects.filter { 8 + $0.w * $0.h * 2 <= maxP }
         let useLz4 = lz4 && !lz4Gate.off && info.hasLZ4 && lz4Available
         let (bytes, s, nLz4) = encodeBatchLz4(rs, buf, copies: info.hasCopy ? copies : [], frameID: frameID, lz4: useLz4, seq: &seq)
-        lastPushLz4 = nLz4; lastPushBytes = bytes.count
+        lastPushLz4 = nLz4; lastPushBytes = bytes.count             // 补齐之前的长度（看 % 512）
         guard write(port, bytes) else { drop("写失败"); return false }
-        guard let r = wait(type: LinkType.ack, seq: s, timeoutMs: 10_000), let a = AckStats(r) else { drop("PRESENT 没有应答"); return false }
+        guard let r = wait(type: LinkType.ack, seq: s, timeoutMs: 10_000), let a = AckStats(r) else { stalledProbe(port, present: s); return false }
         defer { errBase = a.crcErr + a.lenErr + a.badParam; badBase = a.badParam }
         let ok = presentAckOK(a, errBase: errBase)     // 沉浸模式里 PRESENT 回 status 1
         if lz4Gate.batch(nLz4: nLz4, status: a.status, badParam: a.badParam, badBase: badBase) {

@@ -69,16 +69,22 @@ var immersiveFlag = false
 var segPngPath: String?
 /// fw v11：不发 RECT_LZ4（A/B 对比整帧快慢）
 var lz4Flag = true
+/// --no-usb-pad：写 USB 时不补齐（MonitaCore usbPadded），真机 A/B 复现"PRESENT 没有应答"用
+var usbPadFlag = true
 /// fw v11：--bench-device [N]，设备侧 LZ4 自测（DIAG 33）N 次，打印后退出
 var benchDevice: Int?
+/// --stress [秒]：混合压测，见 Stress.swift
+var stressS: Int?
 do {
     var args = CommandLine.arguments.dropFirst().makeIterator()
-    var afterBenchDevice = false
+    var afterBenchDevice = false, afterStress = false
     while let a = args.next() {
-        defer { afterBenchDevice = a == "--bench-device" }
+        defer { afterBenchDevice = a == "--bench-device"; afterStress = a == "--stress" }
         if afterBenchDevice, let n = Int(a) { benchDevice = n; continue }
+        if afterStress, let n = Int(a) { stressS = n; continue }
         switch a {
         case "--bench-device": benchDevice = 8
+        case "--stress": stressS = 300
         case "--host": hostURL = args.next() ?? hostURL
         case "--device":
             let v = args.next() ?? ""
@@ -104,8 +110,9 @@ do {
         case "--immersive": immersiveFlag = true
         case "--seg-png": segPngPath = args.next()
         case "--no-lz4": lz4Flag = false
+        case "--no-usb-pad": usbPadFlag = false
         default:
-            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock|--immersive] [--immersive] [--no-lz4] [--device ... --bench-device [N]]")
+            print("用法：monita-cs80 [--host URL | --device usb[:N]|/dev/xxx [--bench] [--no-scroll] [--flip-now]] [--lyrics URL] [--name 名字] [--tick ms] [--png out.png [--lock] [--sample lyrics.json [--at 秒]]] [--dry-run] [--no-seg] [--no-keys] [--no-led] [--seg-png out.png [--sample lyrics.json [--at 秒]]] [--png out.png --clock|--immersive] [--immersive] [--no-lz4] [--no-usb-pad] [--device ... --bench-device [N] | --stress [秒]]")
             exit(a == "-h" || a == "--help" ? 0 : 2)
         }
     }
@@ -448,6 +455,7 @@ let link: DeviceLink? = deviceSpec.map { spec in
     case .usb(let n): l = DeviceLink(name: n.map { "usb:\($0)" } ?? "usb") { openUsb(interface: n) }
     }
     l.lz4 = lz4Flag
+    l.usbPad = usbPadFlag
     return l
 }
 if let n = benchDevice {
@@ -458,6 +466,10 @@ if let n = benchDevice {
         print(formatLz4Bench(d)); exit(0)
     }
     print(lz4BenchUnsupported); exit(1)
+}
+if let n = stressS {
+    guard let link else { print("--stress 要配 --device"); exit(2) }
+    exit(runStress(link, seconds: n) ? 0 : 1)
 }
 if bench || conformance {
     guard let link else { print("--bench / --conformance 要配 --device"); exit(2) }

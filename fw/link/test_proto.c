@@ -44,6 +44,21 @@ static void test_bad_crc_then_good_in_one_chunk(void){
     CHECK(p.crc_err == 1 && p.frames == 2);
 }
 
+/* 上位机的 USB 补齐 (mac MonitaCore usbPadded): 一次写的长度是 64 的倍数时末尾补一个 0x00, 落在两帧之间。
+ * 拆帧器在 SYNC0 直接跳过, 不计错, 前后的帧照常 */
+static void test_pad_byte_between_frames(void){
+    uint8_t s[100]; uint32_t m = 0;
+    m += lk_encode(s + m, LK_PRESENT, 1, (const uint8_t *)"\x05\x00", 2);
+    s[m++] = 0x00;
+    m += lk_encode(s + m, LK_PING, 2, 0, 0);
+    s[m++] = 0x00;
+    lk_parser_t p; lk_init(&p, pbuf, sizeof pbuf);
+    const uint8_t *d = s; uint32_t n = m; int types[4], nt = 0;
+    while (n){ int ev; uint32_t k = lk_feed(&p, d, n, &ev); d += k; n -= k; if (ev && nt < 4) types[nt++] = p.type; }
+    CHECK(nt == 2 && types[0] == LK_PRESENT && types[1] == LK_PING);
+    CHECK(p.frames == 2 && p.crc_err == 0 && p.len_err == 0 && lk_idle(&p));
+}
+
 static void test_len_over_cap(void){
     uint8_t s[200]; uint8_t big[100] = {0};
     uint32_t m = lk_encode(s, LK_RECT, 1, big, 100);
@@ -125,7 +140,7 @@ static void test_copy_apply(void){
 
 int main(void){
     test_crc(); test_roundtrip_bytewise_and_garbage(); test_bad_crc_then_good_in_one_chunk();
-    test_len_over_cap(); test_rect_apply_and_fbcrc(); test_copy_apply();
+    test_pad_byte_between_frames(); test_len_over_cap(); test_rect_apply_and_fbcrc(); test_copy_apply();
     printf(fails ? "%d FAILED\n" : "all link proto tests passed\n", fails);
     return fails != 0;
 }
