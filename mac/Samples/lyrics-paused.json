@@ -1,13 +1,13 @@
 {
  "state": "paused",
- "title": "副屏之歌（示例）",
- "artist": "Monita",
- "album": "样例数据",
+ "title": "もうじき夏が終わるから",
+ "artist": "n-buna",
+ "album": "样例 · 歌词节选",
  "app": "com.netease.163music",
  "source": "sample",
  "estimated": false,
  "songId": null,
- "cover": null,
+ "cover": "cover.jpg",
  "duration": 214.0,
  "pos": 33.0,
  "at": 0,
@@ -22,42 +22,27 @@
     "tr": ""
    },
    {
-    "t": 12.0,
-    "x": "晚上八点的实验室 灯还亮着",
-    "tr": "The lab lights are still on at eight"
-   },
-   {
-    "t": 18.5,
-    "x": "示波器上跳着一行绿色的心电图",
-    "tr": "A green heartbeat on the scope"
-   },
-   {
     "t": 25.0,
-    "x": "收银台的小屏换了个主人",
-    "tr": "The little till screen found a new owner"
+    "x": "夜になって気がついた 花火の音",
+    "tr": "入夜之后才听见 烟花的声音"
    },
    {
     "t": 31.2,
-    "x": "它不再报金额 只报时间",
-    "tr": "No more prices, only time"
+    "x": "花揺ら歌い今日藍を飛ばせ",
+    "tr": "花影摇曳着歌唱 放飞今日的靛蓝"
    },
    {
     "t": 37.8,
-    "x": "数码管一格一格往前走",
-    "tr": "Segments ticking forward one by one"
+    "x": "貴方に聞こえないように消えて",
+    "tr": "像是不让你听见那样消散"
    },
    {
     "t": 44.0,
-    "x": "像在替我记住这首歌",
-    "tr": "As if keeping this song for me"
+    "x": "それを言えない 僕じゃ言えないよ",
+    "tr": "那句话说不出口 我是说不出口的啊"
    },
    {
     "t": 50.5,
-    "x": "上电不冒烟 就算今天赢了",
-    "tr": "No smoke on power-up, today is a win"
-   },
-   {
-    "t": 57.0,
     "x": "",
     "tr": ""
    }

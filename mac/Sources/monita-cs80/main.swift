@@ -402,6 +402,12 @@ if let png = pngPath {
         d.play.at = nowMs()
         if let p = samplePos { d.play.pos = p }
         shared.data = d
+        // 样例的 cover 写本地文件名（相对样例所在目录），预览图就带封面
+        if !d.cover.isEmpty, !d.cover.contains("://") {
+            let path = URL(fileURLWithPath: sp).deletingLastPathComponent().appendingPathComponent(d.cover).path
+            if let b = FileManager.default.contents(atPath: path) { shared.cover = (d.cover, decodeImage([UInt8](b))) }
+            else { print("读不了样例封面 \(path)，按无封面画") }
+        }
         // 面板数据也用固定值，预览图不带本机状态
         shared.updatePanel {
             $0.agents = AgentCounts(claude: 2, waiting: 1, dsh: 0); $0.waitingLit = true
