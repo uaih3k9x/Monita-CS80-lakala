@@ -97,7 +97,7 @@ mac/                    Swift 包 MonitaCS80
   Sources/MonitaCore/   纯逻辑：歌词定位/折行、像素与 tile diff、推帧决策、帧键省电
   Sources/monita-cs80/  渲染器本体（CoreGraphics 画面、锁屏、推帧循环）
   Tests/                swift-testing 用例
-  Samples/              预览图用的样例数据（歌词节选和封面来自 n-buna《もうじき夏が終わるから》/《花と水飴、最終電車》，仅作预览）
+  Samples/              预览图用的样例数据（歌词节选自 n-buna《もうじき夏が終わるから》，仅作预览；封面 cover.jpg 不进仓库，没有时按无封面画）
 tools/
   host-ref/             Python 参考上位机（pyserial）：握手、推图、差分、测吞吐、撕裂对比
   lyrics/               lyrics.py（当前播放 + 网易云歌词 + 小 HTTP 服务）· lyrics_core.js · build-nowplaying.sh · 测试

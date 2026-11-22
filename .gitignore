@@ -19,3 +19,6 @@ backups/
 # 系统杂物
 .DS_Store
 ._*
+
+# 预览图用的专辑封面有版权，只放本地，不进仓库
+mac/Samples/cover.jpg
