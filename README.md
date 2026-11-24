@@ -159,6 +159,15 @@ python3 -m unittest discover -s tools/lyrics/tests
 node --test tools/lyrics/tests/
 ```
 
+## 衍生项目 / Derived projects
+
+同一块拉卡拉 CS80 副屏、同一套 R05 原生 app 底座，换个玩法：
+
+- [monita-x86](https://github.com/uaih3k9x/monita-x86)：在副屏上跑 x86 模拟器（tiny386），启动 FreeDOS / Windows 3.1，Mac 转发键盘鼠标。
+- [monita-doom](https://github.com/uaih3k9x/monita-doom)：Doom（doomgeneric）移植，作为 R05 app 直接跑在副屏上，WAD 自备。
+
+<!-- TODO: 两个项目的上机照片（Win3.1 Program Manager / Doom 画面）之后补 -->
+
 ## 欢迎贡献
 
 Windows / Linux 上位机非常欢迎有兴趣的朋友来写——我只写了 macOS 的 Swift 版，因为我懒了😂
